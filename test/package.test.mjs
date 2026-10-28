@@ -83,9 +83,23 @@ function inspectJavaScript(code) {
 test("the Git package exports committed JavaScript, not TSX", async () => {
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   assert.equal(manifest.exports["./tui"], "./dist/tui.js");
-  assert.equal(manifest.exports["./server"], "./dist/server.js");
+  assert.equal(manifest.exports["./server"], "./dist/server/index.js");
   assert.equal(manifest.exports["./rpc"], "./dist/rpc.js");
   for (const file of DIST_FILES) assert.ok((await readFile(file, "utf8")).length > 0, file);
+});
+
+test("every export subpath points at a file the package actually ships", async () => {
+  // OpenCode resolves the server and TUI halves through these subpaths, so a
+  // mismatch between `exports` and the build layout silently disables the plugin.
+  const manifest = JSON.parse(await readFile("package.json", "utf8"));
+  for (const [subpath, target] of Object.entries(manifest.exports)) {
+    assert.equal(typeof target, "string", `${subpath} must map to a single file`);
+    assert.ok(target.startsWith("./dist/"), `${subpath} must stay inside dist`);
+    const file = target.replace(/^\.\//, "");
+    assert.ok(DIST_FILES.includes(file), `exports["${subpath}"] points at unpublished ${file}`);
+  }
+  // The bare and `./server` entries must resolve to the same entrypoint.
+  assert.equal(manifest.exports["."], manifest.exports["./server"]);
 });
 
 test("every committed module parses as plain JavaScript with resolvable imports", async () => {

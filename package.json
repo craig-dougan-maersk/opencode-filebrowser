@@ -5,8 +5,8 @@
   "description": "OpenCode plugin: tabbed file browser, plain-text editor and binary viewer for the TUI",
   "license": "MIT",
   "exports": {
-    ".": "./dist/server.js",
-    "./server": "./dist/server.js",
+    ".": "./dist/server/index.js",
+    "./server": "./dist/server/index.js",
     "./tui": "./dist/tui.js",
     "./rpc": "./dist/rpc.js"
   },
