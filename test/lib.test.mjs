@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { looksBinary, extensionOf, isBinaryExtension, isTextExtension, SNIFF_BYTES } from "../dist/lib/binary.js";
 import { isSafeName, planPaste, suggestName } from "../dist/lib/clipboard.js";
-import { ancestorsOf, compileIgnore, flattenTree, isIgnored, isWithin, readDirectory, resolveRoot } from "../dist/lib/fs-tree.js";
+import { ancestorsOf, compileIgnore, createBudget, flattenTree, isIgnored, isWithin, readDirectory, resolveRoot } from "../dist/lib/fs-tree.js";
 import { badgeFor, parsePorcelainZ } from "../dist/lib/git.js";
 import { iconFor, iconSet } from "../dist/lib/icons.js";
 import { compileGlob, compileProtection, isProtected } from "../dist/lib/protect.js";
@@ -376,6 +376,41 @@ test("flattenTree does not follow a symlink cycle twice", async () => {
 
 test("flattenTree returns nothing for an unreadable directory", async () => {
   assert.deepEqual(await flattenTree("/definitely/not/here", new Set(), []), []);
+});
+
+test("flattenTree stops at the row budget and reports truncation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fb-budget-"));
+  try {
+    for (let index = 0; index < 30; index += 1) await writeFile(join(dir, `file-${String(index).padStart(2, "0")}.txt`), "x");
+    const budget = createBudget(10);
+    const rows = await flattenTree(dir, new Set(), [], 0, undefined, budget);
+    assert.equal(rows.length, 10);
+    assert.equal(budget.truncated, true);
+    assert.equal(budget.remaining, 0);
+
+    const roomy = createBudget(100);
+    const all = await flattenTree(dir, new Set(), [], 0, undefined, roomy);
+    assert.equal(all.length, 30);
+    assert.equal(roomy.truncated, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("flattenTree counts a collapsed directory as one row against the budget", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fb-budget-"));
+  try {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "inner.txt"), "x");
+    const budget = createBudget(1);
+    const rows = await flattenTree(dir, new Set([join(dir, "sub")]), [], 0, undefined, budget);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].entry.name, "sub");
+    assert.equal(rows[0].expanded, true);
+    assert.equal(budget.truncated, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------- theme

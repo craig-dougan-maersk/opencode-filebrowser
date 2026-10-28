@@ -101,6 +101,8 @@ export function TreeRowView(props) {
     _$setProp(_el$, "width", "100%");
     _$setProp(_el$, "onMouseDown", event => props.onMouseDown(event, props.row));
     _$setProp(_el$2, "flexGrow", 1);
+    _$setProp(_el$2, "wrapMode", "none");
+    _$setProp(_el$2, "truncate", true);
     _$insert(_el$2, label);
     _$insert(_el$, _$createComponent(Show, {
       get when() {
@@ -108,6 +110,8 @@ export function TreeRowView(props) {
       },
       get children() {
         var _el$3 = _$createElement("text");
+        _$setProp(_el$3, "wrapMode", "none");
+        _$setProp(_el$3, "truncate", true);
         _$insert(_el$3, () => ` ${style().badge}`);
         _$effect(_p$ => {
           var _v$ = style().fg,

@@ -99,6 +99,13 @@ providers are resolved at open time; an unresolved provider degrades to
 are opened — `.env` files, SSH material and private keys by default. The
 relative path and the basename are both tested.
 
+### Large directories
+
+A single flatten is capped at 20,000 rows so an enormous directory cannot stall
+the UI. When the cap is hit the breadcrumb shows `truncated` and the remaining
+entries are simply not listed; collapse a directory or narrow `ignore` to see
+the rest.
+
 ## Keybindings
 
 The browser's keyboard layer is only active while the browser has focus, so its

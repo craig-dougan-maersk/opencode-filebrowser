@@ -66,8 +66,27 @@ export async function readDirectory(directory) {
  * children in order, recursively.
  */
 
-export async function flattenTree(root, expanded, rules, depth = 0, seen) {
+/**
+ * Rows a single flatten may produce before it stops descending. A directory
+ * with hundreds of thousands of entries would otherwise allocate one row per
+ * entry and stall the UI thread on every refresh.
+ */
+export const MAX_TREE_ROWS = 20_000;
+
+/** Mutable budget shared across one flatten so the cap is global, not per directory. */
+
+export function createBudget(limit = MAX_TREE_ROWS) {
+  return {
+    remaining: Math.max(0, limit),
+    truncated: false
+  };
+}
+export async function flattenTree(root, expanded, rules, depth = 0, seen, budget = createBudget()) {
   const rows = [];
+  if (budget.remaining <= 0) {
+    budget.truncated = true;
+    return rows;
+  }
   let entries;
   try {
     entries = await readDirectory(root);
@@ -90,6 +109,11 @@ export async function flattenTree(root, expanded, rules, depth = 0, seen) {
   }
   for (const entry of entries) {
     if (isIgnored(entry, rules)) continue;
+    if (budget.remaining <= 0) {
+      budget.truncated = true;
+      break;
+    }
+    budget.remaining -= 1;
     const isExpanded = entry.directory && expanded.has(entry.path);
     rows.push({
       entry,
@@ -107,7 +131,7 @@ export async function flattenTree(root, expanded, rules, depth = 0, seen) {
       if (guard.has(key)) continue;
       const nextSeen = new Set(guard);
       nextSeen.add(key);
-      rows.push(...(await flattenTree(entry.path, expanded, rules, depth + 1, nextSeen)));
+      rows.push(...(await flattenTree(entry.path, expanded, rules, depth + 1, nextSeen, budget)));
     }
   }
   return rows;

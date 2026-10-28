@@ -33,6 +33,8 @@ export function TabStrip(props: TabStripProps): JSX.Element {
               <text
                 fg={active() ? props.tokens.textPrimary : props.tokens.textMuted}
                 attributes={active() ? TextAttributes.BOLD : TextAttributes.NONE}
+                wrapMode="none"
+                truncate
                 onMouseDown={(event) => {
                   stopEvent(event);
                   props.onSelect(index());
@@ -43,6 +45,8 @@ export function TabStrip(props: TabStripProps): JSX.Element {
               <Show when={props.tabs.length > 1}>
                 <text
                   fg={props.tokens.textFaint}
+                  wrapMode="none"
+                  truncate
                   onMouseDown={(event) => {
                     stopEvent(event);
                     props.onClose(index());
@@ -75,12 +79,14 @@ export function Breadcrumb(props: BreadcrumbProps): JSX.Element {
   };
   return (
     <box flexDirection="row" height={1} flexShrink={0}>
-      <text fg={props.tokens.textMuted}>{label()}</text>
+      <text fg={props.tokens.textMuted} wrapMode="none" truncate>
+        {label()}
+      </text>
       <Show when={props.branch}>
-        <text fg={props.tokens.info}>{`  \u2387 ${props.branch}`}</text>
+        <text fg={props.tokens.info} wrapMode="none" truncate>{`  \u2387 ${props.branch}`}</text>
       </Show>
       <Show when={props.truncated}>
-        <text fg={props.tokens.warning}>{"  truncated"}</text>
+        <text fg={props.tokens.warning} wrapMode="none" truncate>{"  truncated"}</text>
       </Show>
     </box>
   );
@@ -95,8 +101,12 @@ export interface FooterProps {
 export function Footer(props: FooterProps): JSX.Element {
   return (
     <box flexDirection="row" height={1} flexShrink={0} gap={1}>
-      <text fg={props.tokens.textMuted}>{props.message}</text>
-      <text fg={props.tokens.textFaint}>{props.hint}</text>
+      <text fg={props.tokens.textMuted} wrapMode="none" truncate>
+        {props.message}
+      </text>
+      <text fg={props.tokens.textFaint} wrapMode="none" truncate>
+        {props.hint}
+      </text>
     </box>
   );
 }

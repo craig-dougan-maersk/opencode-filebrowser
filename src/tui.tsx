@@ -6,7 +6,7 @@ import { Plugin } from "@opencode/plugin/tui";
 import type { Context, PanelInput } from "@opencode/plugin/tui/context";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import type { Renderable } from "@opentui/core";
-import { ancestorsOf, compileIgnore, flattenTree, isWithin, resolveRoot, type TreeRow } from "./lib/fs-tree";
+import { ancestorsOf, compileIgnore, createBudget, flattenTree, isWithin, resolveRoot, type TreeRow } from "./lib/fs-tree";
 import { readGitStatus, type GitStatus } from "./lib/git";
 import { compileProtection, isProtected } from "./lib/protect";
 import { buildRegistry, resolveProvider } from "./lib/providers";
@@ -54,6 +54,7 @@ function initialTab(root: string): TabState {
     git: undefined,
     loading: true,
     error: undefined,
+    truncated: false,
     editor: undefined,
   };
 }
@@ -123,7 +124,8 @@ export default Plugin.define({
       generations.set(tabID, generation);
       store.update(tabID, (current) => ({ ...current, loading: true, error: undefined }));
       try {
-        const rows = await flattenTree(tab.root, new Set(tab.expanded), ignoreRules());
+        const budget = createBudget();
+        const rows = await flattenTree(tab.root, new Set(tab.expanded), ignoreRules(), 0, undefined, budget);
         const git: GitStatus | undefined = settings().git.enabled
           ? await readGitStatus(tab.root, settings().git.timeoutMs)
           : undefined;
@@ -133,6 +135,7 @@ export default Plugin.define({
           rows,
           git,
           loading: false,
+          truncated: budget.truncated,
           cursorDirectory: cursorDirectoryOf(rows, current.selected, current.root),
         }));
       } catch (error) {
@@ -986,7 +989,12 @@ function Browser(props: BrowserProps): JSX.Element {
                 onSelect={(index) => props.store.setActiveIndex(index)}
                 onClose={(index) => props.store.close(props.store.tabs()[index]?.id ?? "")}
               />
-              <Breadcrumb path={current().root} tokens={props.tokens} branch={current().git?.branch} />
+              <Breadcrumb
+                path={current().root}
+                tokens={props.tokens}
+                branch={current().git?.branch}
+                truncated={current().truncated}
+              />
               <scrollbox width="100%" flexGrow={1}>
                 <For each={current().rows}>
                   {(row) => (

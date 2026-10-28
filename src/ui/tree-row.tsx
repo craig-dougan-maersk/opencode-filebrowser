@@ -99,11 +99,13 @@ export function TreeRowView(props: TreeRowProps): JSX.Element {
         fg={style().fg}
         attributes={props.selected ? style().attributes | BOLD | TextAttributes.INVERSE : style().attributes}
         flexGrow={1}
+        wrapMode="none"
+        truncate
       >
         {label()}
       </text>
       <Show when={style().badge}>
-        <text fg={style().fg} attributes={style().attributes}>
+        <text fg={style().fg} attributes={style().attributes} wrapMode="none" truncate>
           {` ${style().badge}`}
         </text>
       </Show>

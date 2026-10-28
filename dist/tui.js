@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { Plugin } from "@opencode/plugin/tui";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { ancestorsOf, compileIgnore, flattenTree, isWithin, resolveRoot } from "./lib/fs-tree.js";
+import { ancestorsOf, compileIgnore, createBudget, flattenTree, isWithin, resolveRoot } from "./lib/fs-tree.js";
 import { readGitStatus } from "./lib/git.js";
 import { compileProtection, isProtected } from "./lib/protect.js";
 import { buildRegistry, resolveProvider } from "./lib/providers.js";
@@ -49,6 +49,7 @@ function initialTab(root) {
     git: undefined,
     loading: true,
     error: undefined,
+    truncated: false,
     editor: undefined
   };
 }
@@ -113,7 +114,8 @@ export default Plugin.define({
         error: undefined
       }));
       try {
-        const rows = await flattenTree(tab.root, new Set(tab.expanded), ignoreRules());
+        const budget = createBudget();
+        const rows = await flattenTree(tab.root, new Set(tab.expanded), ignoreRules(), 0, undefined, budget);
         const git = settings().git.enabled ? await readGitStatus(tab.root, settings().git.timeoutMs) : undefined;
         if (generations.get(tabID) !== generation) return;
         store.update(tabID, current => ({
@@ -121,6 +123,7 @@ export default Plugin.define({
           rows,
           git,
           loading: false,
+          truncated: budget.truncated,
           cursorDirectory: cursorDirectoryOf(rows, current.selected, current.root)
         }));
       } catch (error) {
@@ -1129,6 +1132,9 @@ function Browser(props) {
             },
             get branch() {
               return current().git?.branch;
+            },
+            get truncated() {
+              return current().truncated;
             }
           }), _el$7);
           _$setProp(_el$7, "width", "100%");

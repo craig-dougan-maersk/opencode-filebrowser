@@ -34,6 +34,8 @@ export function TabStrip(props) {
             _el$3 = _$createElement("text");
           _$insertNode(_el$2, _el$3);
           _$setProp(_el$2, "flexDirection", "row");
+          _$setProp(_el$3, "wrapMode", "none");
+          _$setProp(_el$3, "truncate", true);
           _$setProp(_el$3, "onMouseDown", event => {
             stopEvent(event);
             props.onSelect(index());
@@ -46,6 +48,8 @@ export function TabStrip(props) {
             get children() {
               var _el$4 = _$createElement("text");
               _$insertNode(_el$4, _$createTextNode(`×`));
+              _$setProp(_el$4, "wrapMode", "none");
+              _$setProp(_el$4, "truncate", true);
               _$setProp(_el$4, "onMouseDown", event => {
                 stopEvent(event);
                 props.onClose(index());
@@ -85,6 +89,8 @@ export function Breadcrumb(props) {
     _$setProp(_el$6, "flexDirection", "row");
     _$setProp(_el$6, "height", 1);
     _$setProp(_el$6, "flexShrink", 0);
+    _$setProp(_el$7, "wrapMode", "none");
+    _$setProp(_el$7, "truncate", true);
     _$insert(_el$7, label);
     _$insert(_el$6, _$createComponent(Show, {
       get when() {
@@ -92,6 +98,8 @@ export function Breadcrumb(props) {
       },
       get children() {
         var _el$8 = _$createElement("text");
+        _$setProp(_el$8, "wrapMode", "none");
+        _$setProp(_el$8, "truncate", true);
         _$insert(_el$8, () => `  \u2387 ${props.branch}`);
         _$effect(_$p => _$setProp(_el$8, "fg", props.tokens.info, _$p));
         return _el$8;
@@ -104,6 +112,8 @@ export function Breadcrumb(props) {
       get children() {
         var _el$9 = _$createElement("text");
         _$insertNode(_el$9, _$createTextNode(`  truncated`));
+        _$setProp(_el$9, "wrapMode", "none");
+        _$setProp(_el$9, "truncate", true);
         _$effect(_$p => _$setProp(_el$9, "fg", props.tokens.warning, _$p));
         return _el$9;
       }
@@ -123,7 +133,11 @@ export function Footer(props) {
     _$setProp(_el$1, "height", 1);
     _$setProp(_el$1, "flexShrink", 0);
     _$setProp(_el$1, "gap", 1);
+    _$setProp(_el$10, "wrapMode", "none");
+    _$setProp(_el$10, "truncate", true);
     _$insert(_el$10, () => props.message);
+    _$setProp(_el$11, "wrapMode", "none");
+    _$setProp(_el$11, "truncate", true);
     _$insert(_el$11, () => props.hint);
     _$effect(_p$ => {
       var _v$3 = props.tokens.textMuted,

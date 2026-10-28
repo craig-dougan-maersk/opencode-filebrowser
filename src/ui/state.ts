@@ -30,6 +30,8 @@ export interface TabState {
   git: GitStatus | undefined;
   loading: boolean;
   error: string | undefined;
+  /** Set when the tree hit the row budget and some entries are not shown. */
+  truncated: boolean;
   editor: EditorTab | undefined;
 }
 
