@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/craig-dougan-maersk/opencode-filebrowser/main/schema/filebrowser.schema.json",
+  "title": "OpenCode file browser settings",
+  "description": "Settings for the opencode-filebrowser TUI plugin. Stored at ~/.config/opencode/filebrowser.json (or $XDG_CONFIG_HOME/opencode/filebrowser.json). Every field is optional; an unknown or malformed value falls back to its default without discarding the rest of the file.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "root": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which directory the browser may show and how far it may navigate.",
+      "properties": {
+        "mode": {
+          "enum": ["session", "path", "unrestricted"],
+          "default": "session",
+          "description": "session: the directory of the active session. path: the configured path. unrestricted: the configured path or the session directory, with no containment check."
+        },
+        "path": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Directory used by the path and unrestricted modes. A leading ~ is expanded."
+        },
+        "allowAbove": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow navigating above the configured root."
+        }
+      }
+    },
+    "icons": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "style": {
+          "enum": ["nerdfont", "unicode"],
+          "default": "nerdfont",
+          "description": "nerdfont requires a patched font; unicode is the portable fallback."
+        },
+        "folders": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show folder icons for directories."
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Colour and badge entries by git status."
+        },
+        "badges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the porcelain status badge next to an entry."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 100,
+          "default": 4000,
+          "description": "How long to wait for git status before giving up."
+        }
+      }
+    },
+    "ignore": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["node_modules/", ".git/", "dist/", ".DS_Store"],
+      "description": "Names or basename globs to hide. A trailing slash restricts the rule to directories."
+    },
+    "watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh the tree when the filesystem changes."
+        },
+        "debounceMs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 300,
+          "description": "Quiet period before a filesystem change triggers a refresh."
+        }
+      }
+    },
+    "editor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "type": "string",
+          "default": "plaintext",
+          "description": "Provider id used when no mapping matches. Built-ins are plaintext and readonly."
+        },
+        "maxInlineBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 2097152,
+          "description": "Largest file the inline editor will load; larger files open read-only."
+        },
+        "map": {
+          "type": "array",
+          "description": "Ordered basename globs mapped onto an editor provider.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["match", "provider"],
+            "properties": {
+              "match": { "type": "string", "minLength": 1, "description": "Basename glob, e.g. *.md or Makefile." },
+              "provider": { "type": "string", "minLength": 1, "description": "Provider id, either a built-in or one declared under providers." }
+            }
+          }
+        },
+        "providers": {
+          "type": "object",
+          "description": "External editor providers, keyed by the id used in map and default.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["module"],
+            "properties": {
+              "module": {
+                "type": "string",
+                "minLength": 1,
+                "description": "An npm package name or an absolute path to a local module."
+              },
+              "options": {
+                "type": "object",
+                "description": "Options passed through to the provider unchanged."
+              }
+            }
+          }
+        }
+      }
+    },
+    "binaryViewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "default": "fileviewer.view",
+          "description": "Keymap command dispatched for a binary file, normally provided by opencode-file-viewer."
+        },
+        "fallback": {
+          "type": "array",
+          "default": ["system-open", "hex"],
+          "description": "Ordered fallbacks when the command is unavailable.",
+          "items": {
+            "enum": ["system-open", "hex", "none"],
+            "description": "system-open hands the file to the OS; hex shows an explanatory message; none does nothing."
+          }
+        }
+      }
+    },
+    "protect": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["**/*.env", "**/.ssh/**", "**/secrets/**", "**/*.pem", "**/id_rsa"],
+      "description": "Globs that require a confirmation before a file is opened. ** spans path separators."
+    },
+    "confirmOverwrite": {
+      "type": "boolean",
+      "default": true,
+      "description": "Ask before a paste replaces an existing file."
+    },
+    "keybinds": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Informational keybinding labels shown in the footer.",
+      "properties": {
+        "copy": { "type": "string", "default": "ctrl+c" },
+        "paste": { "type": "string", "default": "ctrl+v" },
+        "refresh": { "type": "string", "default": "r" }
+      }
+    }
+  }
+}

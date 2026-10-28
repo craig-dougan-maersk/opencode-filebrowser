@@ -1,0 +1,27 @@
+name: Verify package
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '26'
+        cache: npm
+    - run: npm ci --ignore-scripts
+    - run: npm audit --audit-level=critical
+    - run: npm run typecheck
+      # Check before rebuilding: otherwise a missing/stale committed dist is hidden.
+    - run: npm run build:check
+    - run: npm test
+    - run: npm run compile
+    - run: git diff --exit-code -- dist
+    - run: find dist -name '*.js' -exec node --check {} +
