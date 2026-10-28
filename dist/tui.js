@@ -3,6 +3,7 @@ import { effect as _$effect } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
 import { insert as _$insert } from "@opentui/solid";
 import { memo as _$memo } from "@opentui/solid";
+import { use as _$use } from "@opentui/solid";
 import { setProp as _$setProp } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
 import { createComponent as _$createComponent } from "@opentui/solid";
@@ -11,7 +12,7 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { Plugin } from "@opencode/plugin/tui";
-import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { ancestorsOf, compileIgnore, flattenTree, isWithin, resolveRoot } from "./lib/fs-tree.js";
 import { readGitStatus } from "./lib/git.js";
 import { compileProtection, isProtected } from "./lib/protect.js";
@@ -71,7 +72,15 @@ export default Plugin.define({
     const [settings, setSettings] = createSignal(structuredClone(DEFAULT_SETTINGS));
     const [clipboard, setClipboard] = createSignal([]);
     const [editorMode, setEditorMode] = createSignal(false);
-    const [keysEnabled, setKeysEnabled] = createSignal(true);
+
+    /**
+     * The focused container of whichever browser instance is on screen. The
+     * navigation layer is scoped to it so the browser never captures keys —
+     * Return and Backspace above all — while the prompt or another surface
+     * holds focus.
+     */
+    let browserRenderable;
+    const ownsFocus = target => target !== undefined && !target.isDestroyed && (target.focused || target.hasFocusedDescendant);
     const store = createTabsStore(initialTab(sessionDirectory));
     let releaseMode;
     let disposed = false;
@@ -623,7 +632,11 @@ export default Plugin.define({
     context.keymap.layer(() => ({
       mode: "base",
       priority: 50,
-      enabled: () => keysEnabled() && !editorMode(),
+      // Scoped to the browser so prompt/global keys are untouched, and enabled
+      // only while it actually owns focus. A target that resolves to nothing
+      // would make the layer globally active, so `enabled` guards it too.
+      target: () => browserRenderable,
+      enabled: () => ownsFocus(browserRenderable) && !editorMode(),
       commands: navigationCommands
     }));
     context.keymap.layer(() => ({
@@ -668,12 +681,15 @@ export default Plugin.define({
           await reveal(target);
         }
       }, {
-        id: `${COMMAND_PREFIX}toggle`,
-        title: "Toggle file browser keys",
+        id: `${COMMAND_PREFIX}focus`,
+        title: "Focus the file browser",
         group: "File browser",
-        description: "Enable or disable the browser's keyboard layer",
+        description: "Move keyboard focus to the file browser so its shortcuts apply",
+        palette: true,
         run: () => {
-          setKeysEnabled(value => !value);
+          const target = browserRenderable;
+          if (!target || target.isDestroyed) return;
+          if (!target.focused) target.focus();
         }
       }]
     }));
@@ -700,7 +716,13 @@ export default Plugin.define({
         }));
       },
       saveEditor: () => void saveEditor(store.active()?.id ?? ""),
-      closeEditor: () => closeEditor(store.active()?.id ?? "")
+      closeEditor: () => closeEditor(store.active()?.id ?? ""),
+      register: target => {
+        browserRenderable = target;
+      },
+      unregister: target => {
+        if (browserRenderable === target) browserRenderable = undefined;
+      }
     };
     context.ui.slot({
       append: "sidebar.content",
@@ -759,6 +781,18 @@ export default Plugin.define({
 function Browser(props) {
   const tab = () => props.store.active();
   let lastClick;
+  /** This instance's focusable container, published as the keymap layer target. */
+  let container;
+
+  // The host focuses the panel's own container on open, which is outside this
+  // subtree, so the scoped layer would stay inactive. Move focus inside the
+  // browser. Runs after the host's mount effect, so it wins. The sidebar is
+  // deliberately left alone: focusing it would steal the prompt's focus.
+  onMount(() => {
+    if (!props.panel) return;
+    props.panel.focus();
+    if (container && !container.isDestroyed) container.focus();
+  });
 
   /** Keeps the active tab's editor buffer in sync with an editor component. */
   const onEditorChange = content => {
@@ -793,11 +827,20 @@ function Browser(props) {
   const hint = createMemo(() => tab()?.editor ? "ctrl+s save · esc close" : "\u2191\u2193 move · \u2192 open · \u2190 up · ctrl+c/v copy/paste · ctrl+o panel");
   return (() => {
     var _el$ = _$createElement("box");
+    _$use(target => {
+      container = target;
+      props.actions.register(target);
+      onCleanup(() => {
+        container = undefined;
+        props.actions.unregister(target);
+      });
+    }, _el$);
     _$setProp(_el$, "flexDirection", "column");
     _$setProp(_el$, "width", "100%");
     _$setProp(_el$, "height", "100%");
     _$setProp(_el$, "paddingLeft", 1);
     _$setProp(_el$, "paddingRight", 1);
+    _$setProp(_el$, "focusable", true);
     _$insert(_el$, _$createComponent(Show, {
       get when() {
         return tab();
