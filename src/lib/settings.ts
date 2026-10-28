@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -212,4 +212,31 @@ export async function loadSettings(file: string = settingsPath()): Promise<Fileb
   } catch {
     return structuredClone(DEFAULT_SETTINGS);
   }
+}
+
+/**
+ * Writes settings atomically: a temporary file in the same directory is
+ * renamed over the target so a crash mid-write cannot truncate the file the
+ * next session reads. Returns the path written.
+ */
+export async function saveSettings(
+  settings: FilebrowserSettings,
+  file: string = settingsPath(),
+): Promise<string> {
+  await mkdir(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  await rename(temporary, file);
+  return file;
+}
+
+/** One-line summary of the values the settings dialog can change. */
+export function describeSettings(settings: FilebrowserSettings): string {
+  return [
+    `root ${settings.root.mode}${settings.root.path ? ` (${settings.root.path})` : ""}`,
+    `icons ${settings.icons.style}`,
+    `git ${settings.git.enabled ? "on" : "off"}`,
+    `editor ${settings.editor.default}`,
+    `viewer ${settings.binaryViewer.command}`,
+  ].join(" · ");
 }

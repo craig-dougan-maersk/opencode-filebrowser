@@ -50,6 +50,12 @@ or malformed field falls back to its default without discarding the rest.
 [`schema/filebrowser.schema.json`](schema/filebrowser.schema.json) describes
 every field and can be referenced from an editor for completion.
 
+Run **File browser settings** from the command palette to change the root mode,
+icon style, git colouring, default editor provider and binary viewer command.
+Each change is written straight back to the file, atomically, and the browser
+reloads the affected trees. The dialog edits a subset of the file; the rest is
+hand-edited as JSON.
+
 ```json
 {
   "$schema": "./filebrowser.schema.json",
@@ -113,6 +119,9 @@ keys do not shadow the rest of OpenCode.
 | `f5` | Refresh the tree |
 | `ctrl+s` | Save (editor) |
 | `esc` | Close the editor |
+
+Two palette commands are always available: **Focus the file browser** and
+**File browser settings**.
 
 ## Agent tool
 

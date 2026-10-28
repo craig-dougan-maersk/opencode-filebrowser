@@ -23,7 +23,7 @@ import {
 import { isSafeName, planPaste, suggestName, type PasteSource } from "./lib/clipboard";
 import { iconSet, type IconSet } from "./lib/icons";
 import { adaptTheme, type ThemeTokens } from "./lib/theme";
-import { DEFAULT_SETTINGS, loadSettings, type FilebrowserSettings } from "./lib/settings";
+import { DEFAULT_SETTINGS, describeSettings, expandHome, loadSettings, saveSettings, settingsPath, type FilebrowserSettings } from "./lib/settings";
 import { FilebrowserRpc } from "./rpc";
 import { TreeRowView } from "./ui/tree-row";
 import { Breadcrumb, Footer, TabStrip, stopEvent } from "./ui/chrome";
@@ -469,6 +469,126 @@ export default Plugin.define({
       else openPanel();
     }
 
+    /** Rewrites settings and re-reads the file so the file stays authoritative. */
+    async function persistSettings(mutate: (current: FilebrowserSettings) => FilebrowserSettings): Promise<void> {
+      const file = settingsPath();
+      const current = await loadSettings(file);
+      const next = mutate(current);
+      try {
+        await saveSettings(next, file);
+      } catch (error) {
+        toast(`Cannot write ${file}: ${message(error)}`, "error");
+        return;
+      }
+      setSettings(next);
+      const before = resolveRoot(current.root.mode, current.root.path, sessionDirectory);
+      const after = resolveRoot(next.root.mode, next.root.path, sessionDirectory);
+      // Only a root change invalidates a tree; every other setting is picked up
+      // by a plain refresh, which keeps the user's selection and expansion.
+      if (before !== after) for (const tab of store.tabs()) setRoot(tab.id, after);
+      else await refreshAll();
+      toast(`Saved ${path.basename(file)}`, "success");
+    }
+
+    /** A small menu over the settings file; every change is written immediately. */
+    async function openSettings(): Promise<void> {
+      const file = settingsPath();
+      while (true) {
+        const current = settings();
+        const choice = await context.ui.dialog.select<string>({
+          title: "File browser settings",
+          placeholder: file,
+          options: [
+            { title: "Root", value: "root", description: describeSettings(current), footer: current.root.mode },
+            { title: "Icons", value: "icons", description: "Directory and file glyphs", footer: current.icons.style },
+            {
+              title: "Git status",
+              value: "git",
+              description: "Colour rows by working-tree state",
+              footer: current.git.enabled ? "on" : "off",
+            },
+            { title: "Editor provider", value: "editor", description: "Default editor for text files", footer: current.editor.default },
+            {
+              title: "Binary viewer",
+              value: "viewer",
+              description: "Command used for non-text files",
+              footer: current.binaryViewer.command,
+            },
+            { title: "Show settings file path", value: "path", description: file },
+          ],
+        });
+        if (choice === undefined) return;
+
+        if (choice === "root") {
+          const mode = await context.ui.dialog.select<FilebrowserSettings["root"]["mode"]>({
+            title: "Root",
+            options: [
+              { title: "Session directory", value: "session", description: "Start at the directory of the current session" },
+              { title: "Fixed path", value: "path", description: "Always start at a path you choose" },
+              { title: "Unrestricted", value: "unrestricted", description: "Start at the session directory, navigate anywhere" },
+            ],
+            current: current.root.mode,
+          });
+          if (mode === undefined) continue;
+          let fixed = current.root.path;
+          if (mode === "path") {
+            const answer = await context.ui.dialog.prompt({
+              title: "Root path",
+              description: "Absolute path, or ~ for your home directory",
+              value: current.root.path ?? "",
+            });
+            if (answer === undefined) continue;
+            fixed = answer === "" ? null : expandHome(answer);
+          }
+          await persistSettings((settings) => ({ ...settings, root: { ...settings.root, mode, path: fixed } }));
+          continue;
+        }
+
+        if (choice === "icons") {
+          const style = await context.ui.dialog.select<FilebrowserSettings["icons"]["style"]>({
+            title: "Icon style",
+            options: [
+              { title: "Nerd Font", value: "nerdfont", description: "Requires a patched font" },
+              { title: "Unicode", value: "unicode", description: "Works with any font" },
+            ],
+            current: current.icons.style,
+          });
+          if (style === undefined) continue;
+          await persistSettings((settings) => ({ ...settings, icons: { ...settings.icons, style } }));
+          continue;
+        }
+
+        if (choice === "git") {
+          await persistSettings((settings) => ({ ...settings, git: { ...settings.git, enabled: !settings.git.enabled } }));
+          continue;
+        }
+
+        if (choice === "editor") {
+          const answer = await context.ui.dialog.prompt({
+            title: "Default editor provider",
+            description: "A built-in id (plaintext, readonly) or a provider id from editor.providers",
+            value: current.editor.default,
+          });
+          if (answer === undefined || answer === "") continue;
+          await persistSettings((settings) => ({ ...settings, editor: { ...settings.editor, default: answer } }));
+          continue;
+        }
+
+        if (choice === "viewer") {
+          const answer = await context.ui.dialog.prompt({
+            title: "Binary viewer command",
+            description: "OpenCode command used to view non-text files",
+            value: current.binaryViewer.command,
+          });
+          if (answer === undefined || answer === "") continue;
+          await persistSettings((settings) => ({ ...settings, binaryViewer: { ...settings.binaryViewer, command: answer } }));
+          continue;
+        }
+
+        await context.ui.dialog.alert({ title: "Settings file", message: file });
+      }
+    }
+
     /** Expands the ancestor chain and selects a path, used by the reveal RPC. */
     async function reveal(target: string): Promise<void> {
       const active = store.active();
@@ -644,6 +764,14 @@ export default Plugin.define({
             if (!target || target.isDestroyed) return;
             if (!target.focused) target.focus();
           },
+        },
+        {
+          id: `${COMMAND_PREFIX}settings`,
+          title: "File browser settings",
+          group: "File browser",
+          description: "Change the browser's settings and write them to filebrowser.json",
+          palette: true,
+          run: () => void openSettings(),
         },
       ],
     }));

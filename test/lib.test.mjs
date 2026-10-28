@@ -11,7 +11,7 @@ import { badgeFor, parsePorcelainZ } from "../dist/lib/git.js";
 import { iconFor, iconSet } from "../dist/lib/icons.js";
 import { compileGlob, compileProtection, isProtected } from "../dist/lib/protect.js";
 import { buildRegistry, compileMapping, resolveProvider } from "../dist/lib/providers.js";
-import { DEFAULT_SETTINGS, expandHome, mergeSettings, settingsPath } from "../dist/lib/settings.js";
+import { DEFAULT_SETTINGS, describeSettings, expandHome, loadSettings, mergeSettings, saveSettings, settingsPath } from "../dist/lib/settings.js";
 import { adaptTheme, syntaxStyleMap } from "../dist/lib/theme.js";
 
 // ---------------------------------------------------------------- settings
@@ -96,6 +96,41 @@ test("settingsPath honours XDG_CONFIG_HOME and expandHome expands only a leading
   assert.ok(expandHome("~/x").startsWith("/"));
   assert.equal(expandHome("/already/absolute"), "/already/absolute");
   assert.equal(expandHome("relative"), "relative");
+});
+
+test("saveSettings writes an atomic round-trip and loadSettings reads it back", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fb-settings-"));
+  try {
+    const file = join(dir, "nested", "filebrowser.json");
+    const settings = mergeSettings({ root: { mode: "path", path: "/tmp/work" }, icons: { style: "unicode" } });
+    assert.equal(await saveSettings(settings, file), file);
+    const read = await loadSettings(file);
+    assert.deepEqual(read, settings);
+    // The write leaves no temporary sibling behind.
+    const { readdir } = await import("node:fs/promises");
+    assert.deepEqual(await readdir(join(dir, "nested")), ["filebrowser.json"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadSettings falls back to defaults for a missing or malformed file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fb-settings-"));
+  try {
+    assert.deepEqual(await loadSettings(join(dir, "absent.json")), DEFAULT_SETTINGS);
+    const broken = join(dir, "broken.json");
+    await writeFile(broken, "{ not json");
+    assert.deepEqual(await loadSettings(broken), DEFAULT_SETTINGS);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("describeSettings names the values the dialog can change", () => {
+  const text = describeSettings(mergeSettings({ root: { mode: "path", path: "/tmp/work" }, git: { enabled: false } }));
+  assert.match(text, /root path \(\/tmp\/work\)/);
+  assert.match(text, /git off/);
+  assert.match(text, /editor plaintext/);
 });
 
 // ---------------------------------------------------------------- git
