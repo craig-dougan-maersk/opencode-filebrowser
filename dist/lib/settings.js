@@ -14,7 +14,13 @@ export const DEFAULT_SETTINGS = {
   git: {
     enabled: true,
     badges: true,
-    timeoutMs: 4000
+    timeoutMs: 4000,
+    palette: "jetbrains",
+    showUnpushed: true
+  },
+  sidebar: {
+    collapsedByDefault: false,
+    maxRows: 20
   },
   ignore: ["node_modules/", ".git/", "dist/", ".DS_Store"],
   watch: {
@@ -34,9 +40,9 @@ export const DEFAULT_SETTINGS = {
   protect: ["**/*.env", "**/.ssh/**", "**/secrets/**", "**/*.pem", "**/id_rsa"],
   confirmOverwrite: true,
   keybinds: {
-    copy: "ctrl+c",
-    paste: "ctrl+v",
-    refresh: "r"
+    copy: "alt+c",
+    paste: "alt+v",
+    refresh: "alt+r"
   }
 };
 
@@ -92,7 +98,14 @@ export function mergeSettings(raw) {
   base.git = {
     enabled: pickBoolean(git.enabled, base.git.enabled),
     badges: pickBoolean(git.badges, base.git.badges),
-    timeoutMs: pickNumber(git.timeoutMs, base.git.timeoutMs, 100)
+    timeoutMs: pickNumber(git.timeoutMs, base.git.timeoutMs, 100),
+    palette: pickOneOf(git.palette, ["jetbrains", "vscode"], base.git.palette),
+    showUnpushed: pickBoolean(git.showUnpushed, base.git.showUnpushed)
+  };
+  const sidebar = isRecord(raw.sidebar) ? raw.sidebar : {};
+  base.sidebar = {
+    collapsedByDefault: pickBoolean(sidebar.collapsedByDefault, base.sidebar.collapsedByDefault),
+    maxRows: Math.floor(pickNumber(sidebar.maxRows, base.sidebar.maxRows, 3))
   };
   base.ignore = pickStringArray(raw.ignore, base.ignore);
   const watch = isRecord(raw.watch) ? raw.watch : {};
@@ -163,5 +176,5 @@ export async function saveSettings(settings, file = settingsPath()) {
 
 /** One-line summary of the values the settings dialog can change. */
 export function describeSettings(settings) {
-  return [`root ${settings.root.mode}${settings.root.path ? ` (${settings.root.path})` : ""}`, `icons ${settings.icons.style}`, `git ${settings.git.enabled ? "on" : "off"}`, `editor ${settings.editor.default}`, `viewer ${settings.binaryViewer.command}`].join(" · ");
+  return [`root ${settings.root.mode}${settings.root.path ? ` (${settings.root.path})` : ""}`, `icons ${settings.icons.style}`, `git ${settings.git.enabled ? settings.git.palette : "off"}`, `editor ${settings.editor.default}`, `viewer ${settings.binaryViewer.command}`].join(" · ");
 }

@@ -1,9 +1,9 @@
-import { createTextNode as _$createTextNode } from "@opentui/solid";
+import { use as _$use } from "@opentui/solid";
 import { effect as _$effect } from "@opentui/solid";
+import { createTextNode as _$createTextNode } from "@opentui/solid";
 import { insertNode as _$insertNode } from "@opentui/solid";
 import { insert as _$insert } from "@opentui/solid";
 import { memo as _$memo } from "@opentui/solid";
-import { use as _$use } from "@opentui/solid";
 import { setProp as _$setProp } from "@opentui/solid";
 import { createElement as _$createElement } from "@opentui/solid";
 import { createComponent as _$createComponent } from "@opentui/solid";
@@ -13,8 +13,9 @@ import os from "node:os";
 import path from "node:path";
 import { Plugin } from "@opencode/plugin/tui";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { TextAttributes } from "@opentui/core";
 import { ancestorsOf, compileIgnore, createBudget, flattenTree, isWithin, resolveRoot } from "./lib/fs-tree.js";
-import { readGitStatus } from "./lib/git.js";
+import { readGitStatus, statusFor } from "./lib/git.js";
 import { compileProtection, isProtected } from "./lib/protect.js";
 import { buildRegistry, resolveProvider } from "./lib/providers.js";
 import { copyEntry, createFile, pathExists, pathIsDirectory, readTextFile, sniffBinary, systemOpenCommand, writeTextFile } from "./lib/files.js";
@@ -25,12 +26,16 @@ import { DEFAULT_SETTINGS, describeSettings, expandHome, loadSettings, saveSetti
 import { FilebrowserRpc } from "./rpc.js";
 import { TreeRowView } from "./ui/tree-row.js";
 import { Breadcrumb, Footer, TabStrip, stopEvent } from "./ui/chrome.js";
-import { PlainTextEditor } from "./ui/editor.js";
-import { ExternalEditor } from "./ui/provider.js";
+import { EditorOverlay } from "./ui/overlay.js";
 import { createTabsStore, nextTabId, selectedPaths, toggleSelection } from "./ui/state.js";
 const PANEL_NAME = "filebrowser.browser";
 const COMMAND_PREFIX = "filebrowser.";
-const EDITOR_MODE = "filebrowser-editor";
+/**
+ * Input mode pushed only while a browser container holds focus. Every browser
+ * shortcut lives in this mode, so nothing is bound while the prompt is focused.
+ */
+const BROWSER_MODE = "filebrowser";
+const SIDEBAR_STATE_KEY = "filebrowser.sidebar";
 const DOUBLE_CLICK_MS = 400;
 const MAX_TABS = 8;
 function message(error) {
@@ -72,22 +77,68 @@ export default Plugin.define({
     const sessionDirectory = context.location?.directory ?? process.cwd();
     const [settings, setSettings] = createSignal(structuredClone(DEFAULT_SETTINGS));
     const [clipboard, setClipboard] = createSignal([]);
-    const [editorMode, setEditorMode] = createSignal(false);
+    /** Tab whose file is open in the editor overlay, if any. */
+    const [overlayTab, setOverlayTab] = createSignal(undefined);
+    const overlayOpen = () => overlayTab() !== undefined;
+    let overlaySeq = 0;
+    const [sidebarState, setSidebarState] = context.storage.store(SIDEBAR_STATE_KEY, {
+      initial: {
+        collapsed: null
+      }
+    });
+    const optionCollapsed = typeof context.options?.collapsedByDefault === "boolean" ? context.options.collapsedByDefault : undefined;
+    const sidebarCollapsed = () => sidebarState.collapsed ?? optionCollapsed ?? settings().sidebar.collapsedByDefault;
+    const toggleSidebar = () => {
+      const next = !sidebarCollapsed();
+      void Promise.resolve(setSidebarState(draft => {
+        draft.collapsed = next;
+      })).catch(error => toast(`Cannot save sidebar state: ${message(error)}`, "warning"));
+    };
+    const panelOpen = () => context.ui.panel.current()?.name === PANEL_NAME;
+    /** Watchers and git only run while some browser is actually visible. */
+    const visible = () => !sidebarCollapsed() || panelOpen();
 
     /**
-     * The focused container of whichever browser instance is on screen. The
-     * navigation layer is scoped to it so the browser never captures keys —
-     * Return and Backspace above all — while the prompt or another surface
-     * holds focus.
+     * Focusable containers of the browser instances on screen. While focus is
+     * on one of them (or inside one) the browser mode is pushed; otherwise no
+     * browser shortcut is reachable and the prompt keeps every key.
      */
+    const containers = new Set();
     let browserRenderable;
-    const ownsFocus = target => target !== undefined && !target.isDestroyed && (target.focused || target.hasFocusedDescendant);
+    let releaseBrowserMode;
+    const [focusedContainer, setFocusedContainer] = createSignal(undefined);
+    const insideBrowser = target => {
+      for (let node = target; node; node = node.parent) {
+        if (containers.has(node)) return node;
+      }
+      return undefined;
+    };
+    const syncBrowserMode = focused => {
+      const owner = overlayOpen() ? undefined : insideBrowser(focused);
+      setFocusedContainer(owner);
+      if (owner) {
+        browserRenderable = owner;
+        if (!releaseBrowserMode) releaseBrowserMode = context.keymap.mode.push(BROWSER_MODE);
+        return;
+      }
+      releaseBrowserMode?.();
+      releaseBrowserMode = undefined;
+    };
+    const onFocusChange = focused => syncBrowserMode(focused);
+    context.renderer.on("focused_renderable", onFocusChange);
+
+    // The overlay suspends the browser mode; restore it once the overlay is gone.
+    createEffect(() => {
+      overlayOpen();
+      syncBrowserMode(context.renderer.currentFocusedRenderable);
+    });
     const store = createTabsStore(initialTab(sessionDirectory));
-    let releaseMode;
     let disposed = false;
     onCleanup(() => {
       disposed = true;
-      releaseMode?.();
+      context.renderer.off("focused_renderable", onFocusChange);
+      releaseBrowserMode?.();
+      releaseBrowserMode = undefined;
     });
     const ignoreRules = createMemo(() => compileIgnore(settings().ignore));
     const protectionRules = createMemo(() => compileProtection(settings().protect));
@@ -116,7 +167,9 @@ export default Plugin.define({
       try {
         const budget = createBudget();
         const rows = await flattenTree(tab.root, new Set(tab.expanded), ignoreRules(), 0, undefined, budget);
-        const git = settings().git.enabled ? await readGitStatus(tab.root, settings().git.timeoutMs) : undefined;
+        const git = settings().git.enabled && visible() ? await readGitStatus(tab.root, settings().git.timeoutMs, {
+          unpushed: settings().git.showUnpushed
+        }) : tab.git;
         if (generations.get(tabID) !== generation) return;
         store.update(tabID, current => ({
           ...current,
@@ -186,75 +239,203 @@ export default Plugin.define({
       }
       setRoot(tabID, parent);
     }
-    function openEditor(tabID, file) {
-      return (async () => {
-        const provider = resolveProvider(registry(), file);
-        try {
-          const loaded = await readTextFile(file, settings().editor.maxInlineBytes);
-          const readOnly = loaded.tooLarge || provider.providerId === "readonly";
-          store.update(tabID, tab => ({
-            ...tab,
-            editor: {
-              path: file,
-              content: loaded.content,
-              saved: loaded.content,
-              providerId: provider.providerId,
-              providerModule: provider.module,
-              providerOptions: provider.options,
-              readOnly,
-              tooLarge: loaded.tooLarge
-            }
-          }));
-          if (!readOnly) {
-            releaseMode?.();
-            releaseMode = context.keymap.mode.push(EDITOR_MODE);
-            setEditorMode(true);
-          }
-        } catch (error) {
-          toast(`Cannot open ${path.basename(file)}: ${message(error)}`, "error");
-        }
-      })();
+    function editorOf(tabID) {
+      return store.tabs().find(candidate => candidate.id === tabID)?.editor;
     }
-    function closeEditor(tabID) {
+    const isDirty = tabID => {
+      const editor = editorOf(tabID);
+      return editor !== undefined && !editor.readOnly && editor.content !== editor.saved;
+    };
+    function dropEditor(tabID) {
+      store.update(tabID, current => ({
+        ...current,
+        editor: undefined
+      }));
+      if (overlayTab() === tabID) setOverlayTab(undefined);
+    }
+    function updateEditorContent(tabID, content) {
+      store.update(tabID, state => ({
+        ...state,
+        editor: state.editor ? {
+          ...state.editor,
+          content
+        } : undefined
+      }));
+    }
+
+    /**
+     * Shows the editor in the host dialog layer, over the session. `show`
+     * replaces the whole dialog stack, so a nested question closes the overlay
+     * and the overlay is re-shown afterwards; the buffer lives in the tab, so
+     * nothing typed is lost.
+     */
+    function showOverlay(tabID) {
       const tab = store.tabs().find(candidate => candidate.id === tabID);
-      const editor = tab?.editor;
-      const drop = () => {
+      if (!tab?.editor) return;
+      // show() runs the previous dialog's onClose; the token lets that stale
+      // onClose see it has been superseded, even when it is the same tab.
+      const seq = ++overlaySeq;
+      setOverlayTab(tabID);
+      syncBrowserMode(null);
+      context.ui.dialog.show(() => _$createComponent(EditorOverlay, {
+        editor: () => editorOf(tabID),
+        root: () => store.tabs().find(candidate => candidate.id === tabID)?.root ?? tab.root,
+        tokens: tokens,
+        get owner() {
+          return context.renderer.nativeScene;
+        },
+        onChange: content => updateEditorContent(tabID, content),
+        onSave: () => void saveEditor(tabID),
+        onClose: () => requestCloseEditor(tabID)
+      }), () => {
+        // The host closed the dialog: Esc, Ctrl+C, a backdrop click, or
+        // another dialog replacing it. A dirty buffer is kept in the tab and
+        // offered again on the next open; a clean one is dropped.
+        if (seq !== overlaySeq || overlayTab() !== tabID) return;
+        setOverlayTab(undefined);
+        if (isDirty(tabID)) {
+          const editor = editorOf(tabID);
+          toast(`${path.basename(editor?.path ?? "")} has unsaved changes; open it again to save or discard`, "warning");
+          return;
+        }
         store.update(tabID, current => ({
           ...current,
           editor: undefined
         }));
-        releaseMode?.();
-        releaseMode = undefined;
-        setEditorMode(false);
-      };
-      if (editor && editor.content !== editor.saved) {
-        void context.ui.dialog.confirm({
-          title: "Discard changes?",
-          message: `${path.basename(editor.path)} has unsaved changes.`
-        }).then(confirmed => {
-          if (confirmed) drop();
-        });
+      });
+      context.ui.dialog.set({
+        size: "xlarge"
+      });
+    }
+    async function openEditor(tabID, file) {
+      const existing = editorOf(tabID);
+      if (existing && (existing.path === file || isDirty(tabID))) {
+        // Never replace a buffer with unsaved changes; bring it back instead.
+        if (existing.path !== file) toast(`${path.basename(existing.path)} has unsaved changes`, "warning");
+        showOverlay(tabID);
         return;
       }
-      drop();
+      const provider = resolveProvider(registry(), file);
+      try {
+        const loaded = await readTextFile(file, settings().editor.maxInlineBytes);
+        const readOnly = loaded.tooLarge || provider.providerId === "readonly";
+        store.update(tabID, tab => ({
+          ...tab,
+          editor: {
+            path: file,
+            content: loaded.content,
+            saved: loaded.content,
+            providerId: provider.providerId,
+            providerModule: provider.module,
+            providerOptions: provider.options,
+            readOnly,
+            tooLarge: loaded.tooLarge
+          }
+        }));
+        showOverlay(tabID);
+      } catch (error) {
+        toast(`Cannot open ${path.basename(file)}: ${message(error)}`, "error");
+      }
+    }
+
+    /** Closes the overlay, asking first when the buffer has unsaved changes. */
+    function requestCloseEditor(tabID) {
+      const editor = editorOf(tabID);
+      if (!editor || !isDirty(tabID)) {
+        dropEditor(tabID);
+        context.ui.dialog.clear();
+        return;
+      }
+      // The question replaces the overlay; clearing the marker first stops the
+      // overlay's onClose from treating the replacement as a close.
+      setOverlayTab(undefined);
+      void context.ui.dialog.select({
+        title: `${path.basename(editor.path)} has unsaved changes`,
+        options: [{
+          title: "Save and close",
+          value: "save"
+        }, {
+          title: "Discard changes",
+          value: "discard"
+        }, {
+          title: "Keep editing",
+          value: "keep"
+        }],
+        current: "save"
+      }).then(async choice => {
+        if (choice === "save") {
+          if (await saveEditor(tabID)) {
+            dropEditor(tabID);
+            context.ui.dialog.clear();
+          } else showOverlay(tabID);
+          return;
+        }
+        if (choice === "discard") {
+          dropEditor(tabID);
+          context.ui.dialog.clear();
+          return;
+        }
+        showOverlay(tabID);
+      });
+    }
+
+    /** Closes a browser tab without silently dropping an unsaved buffer. */
+    function closeTab(tabID) {
+      if (!store.tabs().some(candidate => candidate.id === tabID)) return;
+      const finish = () => {
+        const owned = overlayTab() === tabID;
+        dropEditor(tabID);
+        if (owned) context.ui.dialog.clear();
+        store.close(tabID);
+      };
+      const editor = editorOf(tabID);
+      if (!editor || !isDirty(tabID)) {
+        finish();
+        return;
+      }
+      const owned = overlayTab() === tabID;
+      if (owned) setOverlayTab(undefined);
+      void context.ui.dialog.select({
+        title: `${path.basename(editor.path)} has unsaved changes`,
+        options: [{
+          title: "Save and close tab",
+          value: "save"
+        }, {
+          title: "Discard changes and close tab",
+          value: "discard"
+        }, {
+          title: "Cancel",
+          value: "cancel"
+        }],
+        current: "save"
+      }).then(async choice => {
+        if (choice === "save" && !(await saveEditor(tabID))) choice = "cancel";
+        if (choice === "save" || choice === "discard") {
+          finish();
+          context.ui.dialog.clear();
+          return;
+        }
+        if (owned) showOverlay(tabID);
+      });
     }
     async function saveEditor(tabID) {
-      const tab = store.tabs().find(candidate => candidate.id === tabID);
-      const editor = tab?.editor;
-      if (!editor || editor.readOnly) return;
+      const editor = editorOf(tabID);
+      if (!editor || editor.readOnly) return false;
       try {
         await writeTextFile(editor.path, editor.content);
         store.update(tabID, current => ({
           ...current,
           editor: current.editor ? {
             ...current.editor,
-            saved: current.editor.content
+            saved: editor.content
           } : undefined
         }));
         toast(`Saved ${path.basename(editor.path)}`, "success");
-        await refresh(tabID);
+        void refresh(tabID);
+        return true;
       } catch (error) {
         toast(`Save failed: ${message(error)}`, "error");
+        return false;
       }
     }
 
@@ -277,10 +458,14 @@ export default Plugin.define({
         if (fallback === "system-open") {
           const [command, args] = systemOpenCommand(file);
           try {
-            spawn(command, args, {
+            // A missing opener surfaces as an async "error" event, not a throw;
+            // without a listener it would crash the TUI.
+            const child = spawn(command, args, {
               detached: true,
               stdio: "ignore"
-            }).unref();
+            });
+            child.on("error", error => toast(`Cannot open ${path.basename(file)}: ${message(error)}`, "error"));
+            child.unref();
             toast(`Opened ${path.basename(file)} externally`, "info");
           } catch (error) {
             toast(`Cannot open ${path.basename(file)}: ${message(error)}`, "error");
@@ -362,6 +547,11 @@ export default Plugin.define({
       let skipped = 0;
       for (const action of actions) {
         let destination = action.destination;
+        if (action.kind === "skip") {
+          toast(`${path.basename(action.source)} cannot be pasted into itself`, "warning");
+          skipped += 1;
+          continue;
+        }
         if (action.kind === "rename") {
           const original = path.basename(action.source);
           const answer = await context.ui.dialog.prompt({
@@ -512,6 +702,21 @@ export default Plugin.define({
             description: "Colour rows by working-tree state",
             footer: current.git.enabled ? "on" : "off"
           }, {
+            title: "Git colours",
+            value: "palette",
+            description: "JetBrains (modified blue) or VS Code (modified amber)",
+            footer: current.git.palette
+          }, {
+            title: "Unpushed marker",
+            value: "unpushed",
+            description: "Show \u2191 on files changed by commits not yet pushed",
+            footer: current.git.showUnpushed ? "on" : "off"
+          }, {
+            title: "Sidebar starts collapsed",
+            value: "collapsed",
+            description: "Default state of the sidebar section; later toggles are remembered",
+            footer: current.sidebar.collapsedByDefault ? "yes" : "no"
+          }, {
             title: "Editor provider",
             value: "editor",
             description: "Default editor for text files",
@@ -601,6 +806,50 @@ export default Plugin.define({
           }));
           continue;
         }
+        if (choice === "palette") {
+          const palette = await context.ui.dialog.select({
+            title: "Git colours",
+            options: [{
+              title: "JetBrains",
+              value: "jetbrains",
+              description: "Modified blue, untracked red-brown, added green"
+            }, {
+              title: "VS Code",
+              value: "vscode",
+              description: "Modified amber, untracked and added green"
+            }],
+            current: current.git.palette
+          });
+          if (palette === undefined) continue;
+          await persistSettings(settings => ({
+            ...settings,
+            git: {
+              ...settings.git,
+              palette
+            }
+          }));
+          continue;
+        }
+        if (choice === "unpushed") {
+          await persistSettings(settings => ({
+            ...settings,
+            git: {
+              ...settings.git,
+              showUnpushed: !settings.git.showUnpushed
+            }
+          }));
+          continue;
+        }
+        if (choice === "collapsed") {
+          await persistSettings(settings => ({
+            ...settings,
+            sidebar: {
+              ...settings.sidebar,
+              collapsedByDefault: !settings.sidebar.collapsedByDefault
+            }
+          }));
+          continue;
+        }
         if (choice === "editor") {
           const answer = await context.ui.dialog.prompt({
             title: "Default editor provider",
@@ -643,9 +892,18 @@ export default Plugin.define({
     /** Expands the ancestor chain and selects a path, used by the reveal RPC. */
     async function reveal(target) {
       const active = store.active();
-      if (!active) return;
+      if (!active) return false;
       const configured = resolveRoot(settings().root.mode, settings().root.path, sessionDirectory);
-      const base = isWithin(configured, target) ? configured : path.parse(target).root;
+      const inside = isWithin(configured, target);
+      if (!inside && !settings().root.allowAbove && settings().root.mode !== "unrestricted") {
+        toast(`${target} is outside the browser root`, "warning");
+        return false;
+      }
+      if (!(await pathExists(target))) {
+        toast(`${target} does not exist`, "error");
+        return false;
+      }
+      const base = inside ? configured : path.parse(target).root;
       const directory = (await pathIsDirectory(target)) ? target : path.dirname(target);
       const chain = ancestorsOf(base, directory).filter(item => item !== base);
       store.update(active.id, tab => ({
@@ -658,13 +916,14 @@ export default Plugin.define({
         cursorDirectory: directory
       }));
       await refresh(active.id);
+      return true;
     }
 
     // Filesystem watching: one debounced watcher per tab root.
     const watchers = new Map();
     const timers = new Map();
     createEffect(() => {
-      const enabled = settings().watch.enabled;
+      const enabled = settings().watch.enabled && visible();
       const debounceMs = settings().watch.debounceMs;
       const wanted = new Map();
       if (enabled) for (const tab of store.tabs()) wanted.set(tab.id, tab.root);
@@ -713,121 +972,157 @@ export default Plugin.define({
 
     // Host-reported filesystem changes refresh every tab.
     const unsubscribeFs = context.data.on("filesystem.changed", () => {
+      if (!visible()) return;
       for (const tab of store.tabs()) void refresh(tab.id);
     });
+    // Catch up once when the browser becomes visible again.
+    let wasVisible = visible();
+    createEffect(() => {
+      const now = visible();
+      if (now && !wasVisible) void refreshAll();
+      wasVisible = now;
+    });
     onCleanup(unsubscribeFs);
-    const navigationCommands = [{
+    const activeID = () => store.active()?.id ?? "";
+    const selectedRow = () => {
+      const tab = store.active();
+      return tab?.rows.find(candidate => candidate.entry.path === tab.selected);
+    };
+
+    /**
+     * Browser shortcuts. Every bind is an alt chord OpenCode itself leaves
+     * unbound, and the layer lives in BROWSER_MODE, which is pushed only while
+     * focus is inside a browser container. Plain keys (Return, Backspace,
+     * arrows, letters) are never bound, so the prompt keeps all of them.
+     */
+    const browserCommands = [{
       id: `${COMMAND_PREFIX}down`,
       title: "Move down",
-      bind: "down",
-      run: () => moveSelection(store.active()?.id ?? "", 1)
+      bind: "alt+j",
+      run: () => moveSelection(activeID(), 1)
     }, {
       id: `${COMMAND_PREFIX}up`,
       title: "Move up",
-      bind: "up",
-      run: () => moveSelection(store.active()?.id ?? "", -1)
+      bind: "alt+k",
+      run: () => moveSelection(activeID(), -1)
     }, {
       id: `${COMMAND_PREFIX}open`,
       title: "Expand directory or open file",
-      bind: "right,return",
+      bind: "alt+l,alt+o",
       run: () => {
-        const tab = store.active();
-        const row = tab?.rows.find(candidate => candidate.entry.path === tab.selected);
-        if (tab && row) void openEntry(tab.id, row);
+        const row = selectedRow();
+        if (row) void openEntry(activeID(), row);
       }
     }, {
       id: `${COMMAND_PREFIX}collapse`,
       title: "Collapse directory or go up",
-      bind: "left",
+      bind: "alt+h",
       run: () => {
         const tab = store.active();
         if (!tab) return;
-        const row = tab.rows.find(candidate => candidate.entry.path === tab.selected);
+        const row = selectedRow();
         if (row?.entry.directory && tab.expanded.includes(row.entry.path)) toggleExpand(tab.id, row.entry.path);else goUp(tab.id);
       }
     }, {
       id: `${COMMAND_PREFIX}parent`,
       title: "Go to parent directory",
-      bind: "backspace",
-      run: () => goUp(store.active()?.id ?? "")
+      bind: "alt+u",
+      run: () => goUp(activeID())
     }, {
       id: `${COMMAND_PREFIX}refresh`,
       title: "Refresh tree",
-      bind: "f5",
+      bind: "alt+r",
       run: () => void refreshAll()
     }, {
       id: `${COMMAND_PREFIX}goto`,
       title: "Go to directory",
-      bind: "ctrl+g",
-      run: () => void goToPath(store.active()?.id ?? "")
+      bind: "alt+g",
+      run: () => void goToPath(activeID())
     }, {
       id: `${COMMAND_PREFIX}newfile`,
       title: "New file",
-      bind: "ctrl+n",
-      run: () => void createEntry(store.active()?.id ?? "")
+      bind: "alt+n",
+      run: () => void createEntry(activeID())
     }, {
       id: `${COMMAND_PREFIX}copy`,
       title: "Copy selection",
-      bind: "ctrl+c",
-      run: () => copySelection(store.active()?.id ?? "")
+      bind: "alt+c",
+      run: () => copySelection(activeID())
     }, {
       id: `${COMMAND_PREFIX}paste`,
       title: "Paste into directory",
-      bind: "ctrl+v",
-      run: () => void pasteClipboard(store.active()?.id ?? "")
+      bind: "alt+v",
+      run: () => void pasteClipboard(activeID())
     }, {
       id: `${COMMAND_PREFIX}newtab`,
       title: "New browser tab",
-      bind: "ctrl+t",
+      bind: "alt+t",
       run: () => newTab()
     }, {
       id: `${COMMAND_PREFIX}closetab`,
       title: "Close browser tab",
-      bind: "ctrl+w",
+      bind: "alt+w",
       run: () => {
         const tab = store.active();
-        if (tab && store.tabs().length > 1) store.close(tab.id);
+        if (tab && store.tabs().length > 1) closeTab(tab.id);
       }
     }, {
       id: `${COMMAND_PREFIX}nexttab`,
       title: "Next browser tab",
-      bind: "ctrl+tab",
+      bind: "alt+]",
       run: () => store.setActiveIndex(store.activeIndex() + 1)
     }, {
       id: `${COMMAND_PREFIX}previoustab`,
       title: "Previous browser tab",
-      bind: "ctrl+shift+tab",
+      bind: "alt+[",
       run: () => store.setActiveIndex(store.activeIndex() - 1)
     }, {
       id: `${COMMAND_PREFIX}togglepanel`,
       title: "Toggle browser panel",
-      bind: "ctrl+o",
+      bind: "alt+p",
       run: () => togglePanel()
     }];
     context.keymap.layer(() => ({
-      mode: "base",
+      mode: BROWSER_MODE,
       priority: 50,
-      // Scoped to the browser so prompt/global keys are untouched, and enabled
-      // only while it actually owns focus. A target that resolves to nothing
-      // would make the layer globally active, so `enabled` guards it too.
-      target: () => browserRenderable,
-      enabled: () => ownsFocus(browserRenderable) && !editorMode(),
-      commands: navigationCommands
+      commands: browserCommands
     }));
+
+    // Editor keys. The overlay runs in the host's modal mode, which also owns
+    // Esc ("Close dialog"); this layer outranks it so Esc can ask about unsaved
+    // changes first. It is enabled only while the overlay is open.
     context.keymap.layer(() => ({
-      mode: EDITOR_MODE,
+      mode: "modal",
       priority: 60,
-      enabled: () => editorMode(),
+      enabled: () => overlayOpen(),
       commands: [{
         id: `${COMMAND_PREFIX}save`,
         title: "Save file",
         bind: "ctrl+s",
-        run: () => void saveEditor(store.active()?.id ?? "")
+        run: () => {
+          const id = overlayTab();
+          if (id) void saveEditor(id);
+        }
+      }, {
+        // The host's modal Ctrl+C empties the focused textarea before it
+        // closes a dialog, which would wipe the buffer. Swallow it here unless
+        // there is a selection for the host to clear.
+        id: `${COMMAND_PREFIX}editorguard`,
+        title: "Keep editor buffer",
+        bind: "ctrl+c",
+        run: () => {
+          if (context.renderer.getSelection()) return false;
+          if (context.renderer.currentFocusedEditor?.hasSelection?.()) return false;
+        }
       }, {
         id: `${COMMAND_PREFIX}closeeditor`,
         title: "Close editor",
         bind: "escape",
-        run: () => closeEditor(store.active()?.id ?? "")
+        run: () => {
+          const id = overlayTab();
+          if (!id) return false;
+          requestCloseEditor(id);
+        }
       }]
     }));
     context.keymap.layer(() => ({
@@ -862,10 +1157,18 @@ export default Plugin.define({
         description: "Move keyboard focus to the file browser so its shortcuts apply",
         palette: true,
         run: () => {
-          const target = browserRenderable;
+          const target = browserRenderable && !browserRenderable.isDestroyed ? browserRenderable : [...containers][0];
           if (!target || target.isDestroyed) return;
+          if (sidebarCollapsed() && !panelOpen()) toggleSidebar();
           if (!target.focused) target.focus();
         }
+      }, {
+        id: `${COMMAND_PREFIX}togglesidebar`,
+        title: "Collapse or expand the file browser",
+        group: "File browser",
+        description: "Toggle the file browser section in the sidebar",
+        palette: true,
+        run: () => toggleSidebar()
       }, {
         id: `${COMMAND_PREFIX}settings`,
         title: "File browser settings",
@@ -897,24 +1200,38 @@ export default Plugin.define({
           cursorDirectory: directoryOf(row)
         }));
       },
-      saveEditor: () => void saveEditor(store.active()?.id ?? ""),
-      closeEditor: () => closeEditor(store.active()?.id ?? ""),
+      isDirty: tabID => isDirty(tabID),
+      closeTab: tabID => closeTab(tabID),
+      hasFocus: target => target !== undefined && focusedContainer() === target,
       register: target => {
-        browserRenderable = target;
+        containers.add(target);
+        syncBrowserMode(context.renderer.currentFocusedRenderable);
       },
       unregister: target => {
+        containers.delete(target);
         if (browserRenderable === target) browserRenderable = undefined;
+        syncBrowserMode(context.renderer.currentFocusedRenderable);
       }
     };
     context.ui.slot({
       append: "sidebar.content",
-      render: () => _$createComponent(Browser, {
-        context: context,
+      render: () => _$createComponent(SidebarSection, {
         tokens: tokens,
-        store: store,
-        settings: settings,
-        icons: icons,
-        actions: actions
+        collapsed: sidebarCollapsed,
+        onToggle: toggleSidebar,
+        title: () => store.active()?.title ?? "Files",
+        git: () => store.active()?.git,
+        get children() {
+          return _$createComponent(Browser, {
+            context: context,
+            tokens: tokens,
+            store: store,
+            settings: settings,
+            icons: icons,
+            actions: actions,
+            maxRows: () => settings().sidebar.maxRows
+          });
+        }
       })
     });
     context.ui.slot({
@@ -948,46 +1265,125 @@ export default Plugin.define({
       const here = context.location?.directory;
       if (here && event.location?.directory && event.location.directory !== here) return;
       const data = event.data;
-      await reveal(data.path);
+      if (!(await reveal(data.path))) return;
       const active = store.active();
       if (!active) return;
-      if (data.mode === "edit") await openEditor(active.id, data.path);else if (data.mode === "view") openBinary(data.path);
+      const row = active.rows.find(candidate => candidate.entry.path === data.path);
+      // Opening goes through openEntry so protection rules and the binary sniff
+      // apply exactly as they do for a double-click.
+      if (row && data.mode !== "reveal") await openEntry(active.id, row);
     });
     void refresh(store.active()?.id ?? "");
     return () => {
       unsubscribeRpc();
-      releaseMode?.();
+      context.renderer.off("focused_renderable", onFocusChange);
+      releaseBrowserMode?.();
+      releaseBrowserMode = undefined;
     };
   }
 });
+/**
+ * Bordered, collapsible sidebar section in the style of the host's own
+ * sidebar groups: a ▶/▼ header that toggles on click, with the body hidden
+ * (and its watchers paused) while collapsed.
+ */
+function SidebarSection(props) {
+  const summary = () => {
+    const git = props.git();
+    if (!git?.branch) return "";
+    const ahead = git.ahead ? ` \u2191${git.ahead}` : "";
+    const behind = git.behind ? ` \u2193${git.behind}` : "";
+    return `${git.branch}${ahead}${behind}`;
+  };
+  return (() => {
+    var _el$ = _$createElement("box"),
+      _el$2 = _$createElement("box"),
+      _el$3 = _$createElement("text"),
+      _el$4 = _$createElement("text"),
+      _el$6 = _$createElement("text");
+    _$insertNode(_el$, _el$2);
+    _$setProp(_el$, "flexDirection", "column");
+    _$setProp(_el$, "width", "100%");
+    _$setProp(_el$, "borderStyle", "rounded");
+    _$setProp(_el$, "paddingLeft", 1);
+    _$setProp(_el$, "paddingRight", 1);
+    _$insertNode(_el$2, _el$3);
+    _$insertNode(_el$2, _el$4);
+    _$insertNode(_el$2, _el$6);
+    _$setProp(_el$2, "flexDirection", "row");
+    _$setProp(_el$2, "height", 1);
+    _$setProp(_el$2, "flexShrink", 0);
+    _$setProp(_el$2, "gap", 1);
+    _$setProp(_el$2, "onMouseDown", event => {
+      stopEvent(event);
+      event?.preventDefault?.();
+      props.onToggle();
+    });
+    _$insert(_el$3, () => props.collapsed() ? "\u25b6" : "\u25bc");
+    _$insertNode(_el$4, _$createTextNode(`Files`));
+    _$setProp(_el$4, "wrapMode", "none");
+    _$setProp(_el$4, "truncate", true);
+    _$setProp(_el$6, "wrapMode", "none");
+    _$setProp(_el$6, "truncate", true);
+    _$setProp(_el$6, "flexGrow", 1);
+    _$insert(_el$6, () => props.title());
+    _$insert(_el$2, _$createComponent(Show, {
+      get when() {
+        return summary();
+      },
+      get children() {
+        var _el$7 = _$createElement("text");
+        _$setProp(_el$7, "wrapMode", "none");
+        _$setProp(_el$7, "truncate", true);
+        _$insert(_el$7, summary);
+        _$effect(_$p => _$setProp(_el$7, "fg", props.tokens.info, _$p));
+        return _el$7;
+      }
+    }), null);
+    _$insert(_el$, _$createComponent(Show, {
+      get when() {
+        return !props.collapsed();
+      },
+      get children() {
+        return props.children;
+      }
+    }), null);
+    _$effect(_p$ => {
+      var _v$ = props.tokens.textFaint,
+        _v$2 = props.tokens.textMuted,
+        _v$3 = props.tokens.textBase,
+        _v$4 = TextAttributes.BOLD,
+        _v$5 = props.tokens.textMuted;
+      _v$ !== _p$.e && (_p$.e = _$setProp(_el$, "borderColor", _v$, _p$.e));
+      _v$2 !== _p$.t && (_p$.t = _$setProp(_el$3, "fg", _v$2, _p$.t));
+      _v$3 !== _p$.a && (_p$.a = _$setProp(_el$4, "fg", _v$3, _p$.a));
+      _v$4 !== _p$.o && (_p$.o = _$setProp(_el$4, "attributes", _v$4, _p$.o));
+      _v$5 !== _p$.i && (_p$.i = _$setProp(_el$6, "fg", _v$5, _p$.i));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined,
+      a: undefined,
+      o: undefined,
+      i: undefined
+    });
+    return _el$;
+  })();
+}
 function Browser(props) {
   const tab = () => props.store.active();
   let lastClick;
-  /** This instance's focusable container, published as the keymap layer target. */
   let container;
+  const [self, setSelf] = createSignal(undefined);
 
   // The host focuses the panel's own container on open, which is outside this
-  // subtree, so the scoped layer would stay inactive. Move focus inside the
-  // browser. Runs after the host's mount effect, so it wins. The sidebar is
-  // deliberately left alone: focusing it would steal the prompt's focus.
+  // subtree. Move focus inside the browser so its shortcuts apply. The sidebar
+  // is deliberately left alone: focusing it would steal the prompt's focus.
   onMount(() => {
     if (!props.panel) return;
     props.panel.focus();
     if (container && !container.isDestroyed) container.focus();
   });
-
-  /** Keeps the active tab's editor buffer in sync with an editor component. */
-  const onEditorChange = content => {
-    const current = props.store.active();
-    if (!current) return;
-    props.store.update(current.id, state => ({
-      ...state,
-      editor: state.editor ? {
-        ...state.editor,
-        content
-      } : undefined
-    }));
-  };
   const onRowMouseDown = (event, row) => {
     stopEvent(event);
     const now = Date.now();
@@ -1006,237 +1402,213 @@ function Browser(props) {
   };
   const protectedRows = createMemo(() => compileProtection(props.settings().protect));
   const isRowProtected = (row, root) => isProtected(row.entry.path, root, protectedRows()) !== undefined;
-  const hint = createMemo(() => tab()?.editor ? "ctrl+s save · esc close" : "\u2191\u2193 move · \u2192 open · \u2190 up · ctrl+c/v copy/paste · ctrl+o panel");
+  const focused = () => props.actions.hasFocus(self());
+  const hint = () => focused() ? "alt+j/k move · alt+l open · alt+h up · alt+c/v copy/paste · alt+p panel" : "click to focus · double-click opens";
+  const treeHeight = () => {
+    const limit = props.maxRows?.();
+    if (limit === undefined) return undefined;
+    const rows = tab()?.rows.length ?? 0;
+    return Math.max(1, Math.min(limit, rows === 0 ? 1 : rows));
+  };
   return (() => {
-    var _el$ = _$createElement("box");
+    var _el$8 = _$createElement("box");
     _$use(target => {
       container = target;
+      setSelf(target);
       props.actions.register(target);
       onCleanup(() => {
         container = undefined;
+        setSelf(undefined);
         props.actions.unregister(target);
       });
-    }, _el$);
-    _$setProp(_el$, "flexDirection", "column");
-    _$setProp(_el$, "width", "100%");
-    _$setProp(_el$, "height", "100%");
-    _$setProp(_el$, "paddingLeft", 1);
-    _$setProp(_el$, "paddingRight", 1);
-    _$setProp(_el$, "focusable", true);
-    _$insert(_el$, _$createComponent(Show, {
+    }, _el$8);
+    _$setProp(_el$8, "flexDirection", "column");
+    _$setProp(_el$8, "width", "100%");
+    _$setProp(_el$8, "focusable", true);
+    _$insert(_el$8, _$createComponent(Show, {
       get when() {
         return tab();
       },
       get fallback() {
         return (() => {
-          var _el$4 = _$createElement("text");
-          _$insertNode(_el$4, _$createTextNode(`no browser tab`));
-          _$effect(_$p => _$setProp(_el$4, "fg", props.tokens.textMuted, _$p));
-          return _el$4;
+          var _el$1 = _$createElement("text");
+          _$insertNode(_el$1, _$createTextNode(`no browser tab`));
+          _$effect(_$p => _$setProp(_el$1, "fg", props.tokens.textMuted, _$p));
+          return _el$1;
         })();
       },
-      children: current => _$createComponent(Show, {
-        get when() {
-          return !current().editor;
-        },
-        get fallback() {
-          return (() => {
-            var _el$11 = _$createElement("box"),
-              _el$12 = _$createElement("box"),
-              _el$13 = _$createElement("text"),
-              _el$14 = _$createElement("text");
-            _$insertNode(_el$11, _el$12);
-            _$setProp(_el$11, "flexDirection", "column");
-            _$setProp(_el$11, "width", "100%");
-            _$setProp(_el$11, "height", "100%");
-            _$insert(_el$11, _$createComponent(Show, {
-              get when() {
-                return current().editor.providerModule;
-              },
-              get fallback() {
-                return _$createComponent(PlainTextEditor, {
-                  get tab() {
-                    return current().editor;
-                  },
-                  get tokens() {
-                    return props.tokens;
-                  },
-                  get owner() {
-                    return props.context.renderer.nativeScene;
-                  },
-                  onChange: onEditorChange
-                });
-              },
-              get children() {
-                return _$createComponent(ExternalEditor, {
-                  get tab() {
-                    return current().editor;
-                  },
-                  get tokens() {
-                    return props.tokens;
-                  },
-                  onChange: onEditorChange
-                });
-              }
-            }), _el$12);
-            _$insertNode(_el$12, _el$13);
-            _$insertNode(_el$12, _el$14);
-            _$setProp(_el$12, "flexDirection", "row");
-            _$setProp(_el$12, "height", 1);
-            _$setProp(_el$12, "flexShrink", 0);
-            _$setProp(_el$12, "gap", 1);
-            _$insert(_el$13, () => `${path.basename(current().editor.path)} · ${current().editor.content === current().editor.saved ? "saved" : "modified"}`);
-            _$insert(_el$14, (() => {
-              var _c$ = _$memo(() => !!current().editor.readOnly);
-              return () => _c$() ? "read-only" : current().editor.providerId;
-            })());
-            _$effect(_p$ => {
-              var _v$ = props.tokens.textMuted,
-                _v$2 = props.tokens.textFaint;
-              _v$ !== _p$.e && (_p$.e = _$setProp(_el$13, "fg", _v$, _p$.e));
-              _v$2 !== _p$.t && (_p$.t = _$setProp(_el$14, "fg", _v$2, _p$.t));
-              return _p$;
-            }, {
-              e: undefined,
-              t: undefined
-            });
-            return _el$11;
-          })();
-        },
-        get children() {
-          var _el$6 = _$createElement("box"),
-            _el$7 = _$createElement("scrollbox");
-          _$insertNode(_el$6, _el$7);
-          _$setProp(_el$6, "flexDirection", "column");
-          _$setProp(_el$6, "width", "100%");
-          _$setProp(_el$6, "height", "100%");
-          _$insert(_el$6, _$createComponent(TabStrip, {
-            get tabs() {
-              return props.store.tabs();
-            },
-            get activeIndex() {
-              return props.store.activeIndex();
-            },
+      children: current => (() => {
+        var _el$11 = _$createElement("box"),
+          _el$12 = _$createElement("scrollbox");
+        _$insertNode(_el$11, _el$12);
+        _$setProp(_el$11, "flexDirection", "column");
+        _$setProp(_el$11, "width", "100%");
+        _$insert(_el$11, _$createComponent(TabStrip, {
+          get tabs() {
+            return props.store.tabs();
+          },
+          get activeIndex() {
+            return props.store.activeIndex();
+          },
+          get tokens() {
+            return props.tokens;
+          },
+          get isDirty() {
+            return props.actions.isDirty;
+          },
+          onSelect: index => props.store.setActiveIndex(index),
+          onClose: index => props.actions.closeTab(props.store.tabs()[index]?.id ?? "")
+        }), _el$12);
+        _$insert(_el$11, _$createComponent(Breadcrumb, {
+          get path() {
+            return current().root;
+          },
+          get tokens() {
+            return props.tokens;
+          },
+          get branch() {
+            return current().git?.branch;
+          },
+          get ahead() {
+            return current().git?.ahead;
+          },
+          get behind() {
+            return current().git?.behind;
+          },
+          get truncated() {
+            return current().truncated;
+          }
+        }), _el$12);
+        _$setProp(_el$12, "width", "100%");
+        _$insert(_el$12, _$createComponent(For, {
+          get each() {
+            return current().rows;
+          },
+          children: row => _$createComponent(TreeRowView, {
+            row: row,
             get tokens() {
               return props.tokens;
             },
-            onSelect: index => props.store.setActiveIndex(index),
-            onClose: index => props.store.close(props.store.tabs()[index]?.id ?? "")
-          }), _el$7);
-          _$insert(_el$6, _$createComponent(Breadcrumb, {
-            get path() {
-              return current().root;
+            get icons() {
+              return props.icons();
             },
-            get tokens() {
-              return props.tokens;
+            get selected() {
+              return current().selected === row.entry.path;
             },
-            get branch() {
-              return current().git?.branch;
+            get alsoSelected() {
+              return current().extraSelection.includes(row.entry.path);
             },
-            get truncated() {
-              return current().truncated;
-            }
-          }), _el$7);
-          _$setProp(_el$7, "width", "100%");
-          _$setProp(_el$7, "flexGrow", 1);
-          _$insert(_el$7, _$createComponent(For, {
-            get each() {
-              return current().rows;
+            get status() {
+              return statusFor(current().git, row.entry.path, row.entry.directory);
             },
-            children: row => _$createComponent(TreeRowView, {
-              row: row,
-              get tokens() {
-                return props.tokens;
-              },
-              get icons() {
-                return props.icons();
-              },
-              get selected() {
-                return current().selected === row.entry.path;
-              },
-              get alsoSelected() {
-                return current().extraSelection.includes(row.entry.path);
-              },
-              get status() {
-                return current().git?.entries.get(row.entry.path);
-              },
-              get ["protected"]() {
-                return isRowProtected(row, current().root);
-              },
-              get showBadges() {
-                return props.settings().git.badges;
-              },
-              onMouseDown: onRowMouseDown
-            })
-          }), null);
-          _$insert(_el$7, _$createComponent(Show, {
-            get when() {
-              return _$memo(() => current().rows.length === 0)() && !current().loading;
+            get ["protected"]() {
+              return isRowProtected(row, current().root);
             },
-            get children() {
-              var _el$8 = _$createElement("text");
-              _$insertNode(_el$8, _$createTextNode(`empty directory`));
-              _$effect(_$p => _$setProp(_el$8, "fg", props.tokens.textMuted, _$p));
-              return _el$8;
-            }
-          }), null);
-          _$insert(_el$7, _$createComponent(Show, {
-            get when() {
-              return current().loading;
+            get showBadges() {
+              return props.settings().git.badges;
             },
-            get children() {
-              var _el$0 = _$createElement("text");
-              _$insertNode(_el$0, _$createTextNode(`loading…`));
-              _$effect(_$p => _$setProp(_el$0, "fg", props.tokens.textMuted, _$p));
-              return _el$0;
-            }
-          }), null);
-          _$insert(_el$7, _$createComponent(Show, {
-            get when() {
-              return current().error;
+            get palette() {
+              return props.settings().git.palette;
             },
-            get children() {
-              var _el$10 = _$createElement("text");
-              _$insert(_el$10, () => current().error);
-              _$effect(_$p => _$setProp(_el$10, "fg", props.tokens.error, _$p));
-              return _el$10;
-            }
-          }), null);
-          _$insert(_el$6, _$createComponent(Footer, {
-            get tokens() {
-              return props.tokens;
+            get showUnpushed() {
+              return props.settings().git.showUnpushed;
             },
-            get message() {
-              return `${current().rows.length} entries${current().selected ? ` · ${path.basename(current().selected)}` : ""}`;
-            },
-            get hint() {
-              return hint();
-            }
-          }), null);
-          return _el$6;
-        }
-      })
+            onMouseDown: onRowMouseDown
+          })
+        }), null);
+        _$insert(_el$12, _$createComponent(Show, {
+          get when() {
+            return _$memo(() => current().rows.length === 0)() && !current().loading;
+          },
+          get children() {
+            var _el$13 = _$createElement("text");
+            _$insertNode(_el$13, _$createTextNode(`empty directory`));
+            _$effect(_$p => _$setProp(_el$13, "fg", props.tokens.textMuted, _$p));
+            return _el$13;
+          }
+        }), null);
+        _$insert(_el$12, _$createComponent(Show, {
+          get when() {
+            return _$memo(() => !!current().loading)() && current().rows.length === 0;
+          },
+          get children() {
+            var _el$15 = _$createElement("text");
+            _$insertNode(_el$15, _$createTextNode(`loading…`));
+            _$effect(_$p => _$setProp(_el$15, "fg", props.tokens.textMuted, _$p));
+            return _el$15;
+          }
+        }), null);
+        _$insert(_el$12, _$createComponent(Show, {
+          get when() {
+            return current().error;
+          },
+          get children() {
+            var _el$17 = _$createElement("text");
+            _$insert(_el$17, () => current().error);
+            _$effect(_$p => _$setProp(_el$17, "fg", props.tokens.error, _$p));
+            return _el$17;
+          }
+        }), null);
+        _$insert(_el$11, _$createComponent(Footer, {
+          get tokens() {
+            return props.tokens;
+          },
+          get message() {
+            return `${current().rows.length} entries${current().selected ? ` · ${path.basename(current().selected)}` : ""}`;
+          },
+          get hint() {
+            return hint();
+          }
+        }), null);
+        _$effect(_p$ => {
+          var _v$9 = props.panel ? "100%" : undefined,
+            _v$0 = props.panel ? 1 : 0,
+            _v$1 = treeHeight();
+          _v$9 !== _p$.e && (_p$.e = _$setProp(_el$11, "height", _v$9, _p$.e));
+          _v$0 !== _p$.t && (_p$.t = _$setProp(_el$12, "flexGrow", _v$0, _p$.t));
+          _v$1 !== _p$.a && (_p$.a = _$setProp(_el$12, "height", _v$1, _p$.a));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined,
+          a: undefined
+        });
+        return _el$11;
+      })()
     }), null);
-    _$insert(_el$, _$createComponent(Show, {
+    _$insert(_el$8, _$createComponent(Show, {
       get when() {
         return props.panel;
       },
       get children() {
-        var _el$2 = _$createElement("box"),
-          _el$3 = _$createElement("text");
-        _$insertNode(_el$2, _el$3);
-        _$setProp(_el$2, "flexDirection", "row");
-        _$setProp(_el$2, "height", 1);
-        _$setProp(_el$2, "flexShrink", 0);
-        _$setProp(_el$3, "onMouseDown", event => {
+        var _el$9 = _$createElement("box"),
+          _el$0 = _$createElement("text");
+        _$insertNode(_el$9, _el$0);
+        _$setProp(_el$9, "flexDirection", "row");
+        _$setProp(_el$9, "height", 1);
+        _$setProp(_el$9, "flexShrink", 0);
+        _$setProp(_el$0, "onMouseDown", event => {
           stopEvent(event);
           props.panel?.focus();
         });
-        _$insert(_el$3, () => props.panel?.focused ? "focused · ctrl+o closes" : "click to focus");
-        _$effect(_$p => _$setProp(_el$3, "fg", props.panel?.focused ? props.tokens.textMuted : props.tokens.textFaint, _$p));
-        return _el$2;
+        _$insert(_el$0, () => props.panel?.focused ? "focused · alt+p closes" : "click to focus");
+        _$effect(_$p => _$setProp(_el$0, "fg", props.panel?.focused ? props.tokens.textMuted : props.tokens.textFaint, _$p));
+        return _el$9;
       }
     }), null);
-    return _el$;
+    _$effect(_p$ => {
+      var _v$6 = props.panel ? "100%" : undefined,
+        _v$7 = props.panel ? 1 : 0,
+        _v$8 = props.panel ? 1 : 0;
+      _v$6 !== _p$.e && (_p$.e = _$setProp(_el$8, "height", _v$6, _p$.e));
+      _v$7 !== _p$.t && (_p$.t = _$setProp(_el$8, "paddingLeft", _v$7, _p$.t));
+      _v$8 !== _p$.a && (_p$.a = _$setProp(_el$8, "paddingRight", _v$8, _p$.a));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined,
+      a: undefined
+    });
+    return _el$8;
   })();
 }

@@ -5,9 +5,9 @@ import path from "node:path";
 import { Plugin } from "@opencode/plugin/tui";
 import type { Context, PanelInput } from "@opencode/plugin/tui/context";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
-import type { Renderable } from "@opentui/core";
+import { TextAttributes, type Renderable } from "@opentui/core";
 import { ancestorsOf, compileIgnore, createBudget, flattenTree, isWithin, resolveRoot, type TreeRow } from "./lib/fs-tree";
-import { readGitStatus, type GitStatus } from "./lib/git";
+import { readGitStatus, statusFor, type GitStatus } from "./lib/git";
 import { compileProtection, isProtected } from "./lib/protect";
 import { buildRegistry, resolveProvider } from "./lib/providers";
 import {
@@ -27,13 +27,17 @@ import { DEFAULT_SETTINGS, describeSettings, expandHome, loadSettings, saveSetti
 import { FilebrowserRpc } from "./rpc";
 import { TreeRowView } from "./ui/tree-row";
 import { Breadcrumb, Footer, TabStrip, stopEvent } from "./ui/chrome";
-import { PlainTextEditor } from "./ui/editor";
-import { ExternalEditor } from "./ui/provider";
+import { EditorOverlay } from "./ui/overlay";
 import { createTabsStore, nextTabId, selectedPaths, toggleSelection, type TabState, type TabsStore } from "./ui/state";
 
 const PANEL_NAME = "filebrowser.browser";
 const COMMAND_PREFIX = "filebrowser.";
-const EDITOR_MODE = "filebrowser-editor";
+/**
+ * Input mode pushed only while a browser container holds focus. Every browser
+ * shortcut lives in this mode, so nothing is bound while the prompt is focused.
+ */
+const BROWSER_MODE = "filebrowser";
+const SIDEBAR_STATE_KEY = "filebrowser.sidebar";
 const DOUBLE_CLICK_MS = 400;
 const MAX_TABS = 8;
 
@@ -79,28 +83,73 @@ export default Plugin.define({
 
     const [settings, setSettings] = createSignal<FilebrowserSettings>(structuredClone(DEFAULT_SETTINGS));
     const [clipboard, setClipboard] = createSignal<PasteSource[]>([]);
-    const [editorMode, setEditorMode] = createSignal(false);
+    /** Tab whose file is open in the editor overlay, if any. */
+    const [overlayTab, setOverlayTab] = createSignal<string | undefined>(undefined);
+    const overlayOpen = () => overlayTab() !== undefined;
+    let overlaySeq = 0;
+
+    const [sidebarState, setSidebarState] = context.storage.store<{ collapsed: boolean | null }>(SIDEBAR_STATE_KEY, {
+      initial: { collapsed: null },
+    });
+    const optionCollapsed = typeof context.options?.collapsedByDefault === "boolean" ? context.options.collapsedByDefault : undefined;
+    const sidebarCollapsed = () => sidebarState.collapsed ?? optionCollapsed ?? settings().sidebar.collapsedByDefault;
+    const toggleSidebar = () => {
+      const next = !sidebarCollapsed();
+      void Promise.resolve(
+        setSidebarState((draft) => {
+          draft.collapsed = next;
+        }),
+      ).catch((error: unknown) => toast(`Cannot save sidebar state: ${message(error)}`, "warning"));
+    };
+    const panelOpen = () => context.ui.panel.current()?.name === PANEL_NAME;
+    /** Watchers and git only run while some browser is actually visible. */
+    const visible = () => !sidebarCollapsed() || panelOpen();
 
     /**
-     * The focused container of whichever browser instance is on screen. The
-     * navigation layer is scoped to it so the browser never captures keys —
-     * Return and Backspace above all — while the prompt or another surface
-     * holds focus.
+     * Focusable containers of the browser instances on screen. While focus is
+     * on one of them (or inside one) the browser mode is pushed; otherwise no
+     * browser shortcut is reachable and the prompt keeps every key.
      */
+    const containers = new Set<Renderable>();
     let browserRenderable: Renderable | undefined;
-    const ownsFocus = (target: Renderable | undefined): boolean =>
-      target !== undefined &&
-      !target.isDestroyed &&
-      (target.focused || target.hasFocusedDescendant);
+    let releaseBrowserMode: (() => void) | undefined;
+    const [focusedContainer, setFocusedContainer] = createSignal<Renderable | undefined>(undefined);
+
+    const insideBrowser = (target: Renderable | null | undefined): Renderable | undefined => {
+      for (let node: Renderable | null | undefined = target; node; node = node.parent as Renderable | null) {
+        if (containers.has(node)) return node;
+      }
+      return undefined;
+    };
+    const syncBrowserMode = (focused: Renderable | null | undefined) => {
+      const owner = overlayOpen() ? undefined : insideBrowser(focused);
+      setFocusedContainer(owner);
+      if (owner) {
+        browserRenderable = owner;
+        if (!releaseBrowserMode) releaseBrowserMode = context.keymap.mode.push(BROWSER_MODE);
+        return;
+      }
+      releaseBrowserMode?.();
+      releaseBrowserMode = undefined;
+    };
+    const onFocusChange = (focused: Renderable | null) => syncBrowserMode(focused);
+    context.renderer.on("focused_renderable", onFocusChange);
+
+    // The overlay suspends the browser mode; restore it once the overlay is gone.
+    createEffect(() => {
+      overlayOpen();
+      syncBrowserMode(context.renderer.currentFocusedRenderable);
+    });
 
     const store = createTabsStore(initialTab(sessionDirectory));
 
-    let releaseMode: (() => void) | undefined;
     let disposed = false;
 
     onCleanup(() => {
       disposed = true;
-      releaseMode?.();
+      context.renderer.off("focused_renderable", onFocusChange);
+      releaseBrowserMode?.();
+      releaseBrowserMode = undefined;
     });
 
     const ignoreRules = createMemo(() => compileIgnore(settings().ignore));
@@ -126,9 +175,10 @@ export default Plugin.define({
       try {
         const budget = createBudget();
         const rows = await flattenTree(tab.root, new Set(tab.expanded), ignoreRules(), 0, undefined, budget);
-        const git: GitStatus | undefined = settings().git.enabled
-          ? await readGitStatus(tab.root, settings().git.timeoutMs)
-          : undefined;
+        const git: GitStatus | undefined =
+          settings().git.enabled && visible()
+            ? await readGitStatus(tab.root, settings().git.timeoutMs, { unpushed: settings().git.showUnpushed })
+            : tab.git;
         if (generations.get(tabID) !== generation) return;
         store.update(tabID, (current) => ({
           ...current,
@@ -194,70 +244,191 @@ export default Plugin.define({
       setRoot(tabID, parent);
     }
 
-    function openEditor(tabID: string, file: string): Promise<void> {
-      return (async () => {
-        const provider = resolveProvider(registry(), file);
-        try {
-          const loaded = await readTextFile(file, settings().editor.maxInlineBytes);
-          const readOnly = loaded.tooLarge || provider.providerId === "readonly";
-          store.update(tabID, (tab) => ({
-            ...tab,
-            editor: {
-              path: file,
-              content: loaded.content,
-              saved: loaded.content,
-              providerId: provider.providerId,
-              providerModule: provider.module,
-              providerOptions: provider.options,
-              readOnly,
-              tooLarge: loaded.tooLarge,
-            },
-          }));
-          if (!readOnly) {
-            releaseMode?.();
-            releaseMode = context.keymap.mode.push(EDITOR_MODE);
-            setEditorMode(true);
-          }
-        } catch (error) {
-          toast(`Cannot open ${path.basename(file)}: ${message(error)}`, "error");
-        }
-      })();
+    function editorOf(tabID: string | undefined) {
+      return store.tabs().find((candidate) => candidate.id === tabID)?.editor;
     }
 
-    function closeEditor(tabID: string): void {
+    const isDirty = (tabID: string | undefined): boolean => {
+      const editor = editorOf(tabID);
+      return editor !== undefined && !editor.readOnly && editor.content !== editor.saved;
+    };
+
+    function dropEditor(tabID: string): void {
+      store.update(tabID, (current) => ({ ...current, editor: undefined }));
+      if (overlayTab() === tabID) setOverlayTab(undefined);
+    }
+
+    function updateEditorContent(tabID: string, content: string): void {
+      store.update(tabID, (state) => ({
+        ...state,
+        editor: state.editor ? { ...state.editor, content } : undefined,
+      }));
+    }
+
+    /**
+     * Shows the editor in the host dialog layer, over the session. `show`
+     * replaces the whole dialog stack, so a nested question closes the overlay
+     * and the overlay is re-shown afterwards; the buffer lives in the tab, so
+     * nothing typed is lost.
+     */
+    function showOverlay(tabID: string): void {
       const tab = store.tabs().find((candidate) => candidate.id === tabID);
-      const editor = tab?.editor;
-      const drop = () => {
-        store.update(tabID, (current) => ({ ...current, editor: undefined }));
-        releaseMode?.();
-        releaseMode = undefined;
-        setEditorMode(false);
-      };
-      if (editor && editor.content !== editor.saved) {
-        void context.ui.dialog
-          .confirm({ title: "Discard changes?", message: `${path.basename(editor.path)} has unsaved changes.` })
-          .then((confirmed) => {
-            if (confirmed) drop();
-          });
+      if (!tab?.editor) return;
+      // show() runs the previous dialog's onClose; the token lets that stale
+      // onClose see it has been superseded, even when it is the same tab.
+      const seq = ++overlaySeq;
+      setOverlayTab(tabID);
+      syncBrowserMode(null);
+      context.ui.dialog.show(
+        () => (
+          <EditorOverlay
+            editor={() => editorOf(tabID)}
+            root={() => store.tabs().find((candidate) => candidate.id === tabID)?.root ?? tab.root}
+            tokens={tokens}
+            owner={context.renderer.nativeScene}
+            onChange={(content) => updateEditorContent(tabID, content)}
+            onSave={() => void saveEditor(tabID)}
+            onClose={() => requestCloseEditor(tabID)}
+          />
+        ),
+        () => {
+          // The host closed the dialog: Esc, Ctrl+C, a backdrop click, or
+          // another dialog replacing it. A dirty buffer is kept in the tab and
+          // offered again on the next open; a clean one is dropped.
+          if (seq !== overlaySeq || overlayTab() !== tabID) return;
+          setOverlayTab(undefined);
+          if (isDirty(tabID)) {
+            const editor = editorOf(tabID);
+            toast(`${path.basename(editor?.path ?? "")} has unsaved changes; open it again to save or discard`, "warning");
+            return;
+          }
+          store.update(tabID, (current) => ({ ...current, editor: undefined }));
+        },
+      );
+      context.ui.dialog.set({ size: "xlarge" });
+    }
+
+    async function openEditor(tabID: string, file: string): Promise<void> {
+      const existing = editorOf(tabID);
+      if (existing && (existing.path === file || isDirty(tabID))) {
+        // Never replace a buffer with unsaved changes; bring it back instead.
+        if (existing.path !== file) toast(`${path.basename(existing.path)} has unsaved changes`, "warning");
+        showOverlay(tabID);
         return;
       }
-      drop();
+      const provider = resolveProvider(registry(), file);
+      try {
+        const loaded = await readTextFile(file, settings().editor.maxInlineBytes);
+        const readOnly = loaded.tooLarge || provider.providerId === "readonly";
+        store.update(tabID, (tab) => ({
+          ...tab,
+          editor: {
+            path: file,
+            content: loaded.content,
+            saved: loaded.content,
+            providerId: provider.providerId,
+            providerModule: provider.module,
+            providerOptions: provider.options,
+            readOnly,
+            tooLarge: loaded.tooLarge,
+          },
+        }));
+        showOverlay(tabID);
+      } catch (error) {
+        toast(`Cannot open ${path.basename(file)}: ${message(error)}`, "error");
+      }
     }
 
-    async function saveEditor(tabID: string): Promise<void> {
-      const tab = store.tabs().find((candidate) => candidate.id === tabID);
-      const editor = tab?.editor;
-      if (!editor || editor.readOnly) return;
+    /** Closes the overlay, asking first when the buffer has unsaved changes. */
+    function requestCloseEditor(tabID: string): void {
+      const editor = editorOf(tabID);
+      if (!editor || !isDirty(tabID)) {
+        dropEditor(tabID);
+        context.ui.dialog.clear();
+        return;
+      }
+      // The question replaces the overlay; clearing the marker first stops the
+      // overlay's onClose from treating the replacement as a close.
+      setOverlayTab(undefined);
+      void context.ui.dialog
+        .select<"save" | "discard" | "keep">({
+          title: `${path.basename(editor.path)} has unsaved changes`,
+          options: [
+            { title: "Save and close", value: "save" },
+            { title: "Discard changes", value: "discard" },
+            { title: "Keep editing", value: "keep" },
+          ],
+          current: "save",
+        })
+        .then(async (choice) => {
+          if (choice === "save") {
+            if (await saveEditor(tabID)) {
+              dropEditor(tabID);
+              context.ui.dialog.clear();
+            } else showOverlay(tabID);
+            return;
+          }
+          if (choice === "discard") {
+            dropEditor(tabID);
+            context.ui.dialog.clear();
+            return;
+          }
+          showOverlay(tabID);
+        });
+    }
+
+    /** Closes a browser tab without silently dropping an unsaved buffer. */
+    function closeTab(tabID: string): void {
+      if (!store.tabs().some((candidate) => candidate.id === tabID)) return;
+      const finish = () => {
+        const owned = overlayTab() === tabID;
+        dropEditor(tabID);
+        if (owned) context.ui.dialog.clear();
+        store.close(tabID);
+      };
+      const editor = editorOf(tabID);
+      if (!editor || !isDirty(tabID)) {
+        finish();
+        return;
+      }
+      const owned = overlayTab() === tabID;
+      if (owned) setOverlayTab(undefined);
+      void context.ui.dialog
+        .select<"save" | "discard" | "cancel">({
+          title: `${path.basename(editor.path)} has unsaved changes`,
+          options: [
+            { title: "Save and close tab", value: "save" },
+            { title: "Discard changes and close tab", value: "discard" },
+            { title: "Cancel", value: "cancel" },
+          ],
+          current: "save",
+        })
+        .then(async (choice) => {
+          if (choice === "save" && !(await saveEditor(tabID))) choice = "cancel";
+          if (choice === "save" || choice === "discard") {
+            finish();
+            context.ui.dialog.clear();
+            return;
+          }
+          if (owned) showOverlay(tabID);
+        });
+    }
+
+    async function saveEditor(tabID: string): Promise<boolean> {
+      const editor = editorOf(tabID);
+      if (!editor || editor.readOnly) return false;
       try {
         await writeTextFile(editor.path, editor.content);
         store.update(tabID, (current) => ({
           ...current,
-          editor: current.editor ? { ...current.editor, saved: current.editor.content } : undefined,
+          editor: current.editor ? { ...current.editor, saved: editor.content } : undefined,
         }));
         toast(`Saved ${path.basename(editor.path)}`, "success");
-        await refresh(tabID);
+        void refresh(tabID);
+        return true;
       } catch (error) {
         toast(`Save failed: ${message(error)}`, "error");
+        return false;
       }
     }
 
@@ -281,7 +452,11 @@ export default Plugin.define({
         if (fallback === "system-open") {
           const [command, args] = systemOpenCommand(file);
           try {
-            spawn(command, args, { detached: true, stdio: "ignore" }).unref();
+            // A missing opener surfaces as an async "error" event, not a throw;
+            // without a listener it would crash the TUI.
+            const child = spawn(command, args, { detached: true, stdio: "ignore" });
+            child.on("error", (error) => toast(`Cannot open ${path.basename(file)}: ${message(error)}`, "error"));
+            child.unref();
             toast(`Opened ${path.basename(file)} externally`, "info");
           } catch (error) {
             toast(`Cannot open ${path.basename(file)}: ${message(error)}`, "error");
@@ -361,6 +536,11 @@ export default Plugin.define({
       let skipped = 0;
       for (const action of actions) {
         let destination = action.destination;
+        if (action.kind === "skip") {
+          toast(`${path.basename(action.source)} cannot be pasted into itself`, "warning");
+          skipped += 1;
+          continue;
+        }
         if (action.kind === "rename") {
           const original = path.basename(action.source);
           const answer = await context.ui.dialog.prompt({
@@ -510,6 +690,24 @@ export default Plugin.define({
               description: "Colour rows by working-tree state",
               footer: current.git.enabled ? "on" : "off",
             },
+            {
+              title: "Git colours",
+              value: "palette",
+              description: "JetBrains (modified blue) or VS Code (modified amber)",
+              footer: current.git.palette,
+            },
+            {
+              title: "Unpushed marker",
+              value: "unpushed",
+              description: "Show \u2191 on files changed by commits not yet pushed",
+              footer: current.git.showUnpushed ? "on" : "off",
+            },
+            {
+              title: "Sidebar starts collapsed",
+              value: "collapsed",
+              description: "Default state of the sidebar section; later toggles are remembered",
+              footer: current.sidebar.collapsedByDefault ? "yes" : "no",
+            },
             { title: "Editor provider", value: "editor", description: "Default editor for text files", footer: current.editor.default },
             {
               title: "Binary viewer",
@@ -566,6 +764,36 @@ export default Plugin.define({
           continue;
         }
 
+        if (choice === "palette") {
+          const palette = await context.ui.dialog.select<FilebrowserSettings["git"]["palette"]>({
+            title: "Git colours",
+            options: [
+              { title: "JetBrains", value: "jetbrains", description: "Modified blue, untracked red-brown, added green" },
+              { title: "VS Code", value: "vscode", description: "Modified amber, untracked and added green" },
+            ],
+            current: current.git.palette,
+          });
+          if (palette === undefined) continue;
+          await persistSettings((settings) => ({ ...settings, git: { ...settings.git, palette } }));
+          continue;
+        }
+
+        if (choice === "unpushed") {
+          await persistSettings((settings) => ({
+            ...settings,
+            git: { ...settings.git, showUnpushed: !settings.git.showUnpushed },
+          }));
+          continue;
+        }
+
+        if (choice === "collapsed") {
+          await persistSettings((settings) => ({
+            ...settings,
+            sidebar: { ...settings.sidebar, collapsedByDefault: !settings.sidebar.collapsedByDefault },
+          }));
+          continue;
+        }
+
         if (choice === "editor") {
           const answer = await context.ui.dialog.prompt({
             title: "Default editor provider",
@@ -593,11 +821,20 @@ export default Plugin.define({
     }
 
     /** Expands the ancestor chain and selects a path, used by the reveal RPC. */
-    async function reveal(target: string): Promise<void> {
+    async function reveal(target: string): Promise<boolean> {
       const active = store.active();
-      if (!active) return;
+      if (!active) return false;
       const configured = resolveRoot(settings().root.mode, settings().root.path, sessionDirectory);
-      const base = isWithin(configured, target) ? configured : path.parse(target).root;
+      const inside = isWithin(configured, target);
+      if (!inside && !settings().root.allowAbove && settings().root.mode !== "unrestricted") {
+        toast(`${target} is outside the browser root`, "warning");
+        return false;
+      }
+      if (!(await pathExists(target))) {
+        toast(`${target} does not exist`, "error");
+        return false;
+      }
+      const base = inside ? configured : path.parse(target).root;
       const directory = (await pathIsDirectory(target)) ? target : path.dirname(target);
       const chain = ancestorsOf(base, directory).filter((item) => item !== base);
       store.update(active.id, (tab) => ({
@@ -610,13 +847,14 @@ export default Plugin.define({
         cursorDirectory: directory,
       }));
       await refresh(active.id);
+      return true;
     }
 
     // Filesystem watching: one debounced watcher per tab root.
     const watchers = new Map<string, { close: () => void; root: string }>();
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
     createEffect(() => {
-      const enabled = settings().watch.enabled;
+      const enabled = settings().watch.enabled && visible();
       const debounceMs = settings().watch.debounceMs;
       const wanted = new Map<string, string>();
       if (enabled) for (const tab of store.tabs()) wanted.set(tab.id, tab.root);
@@ -660,74 +898,120 @@ export default Plugin.define({
 
     // Host-reported filesystem changes refresh every tab.
     const unsubscribeFs = context.data.on("filesystem.changed", () => {
+      if (!visible()) return;
       for (const tab of store.tabs()) void refresh(tab.id);
+    });
+    // Catch up once when the browser becomes visible again.
+    let wasVisible = visible();
+    createEffect(() => {
+      const now = visible();
+      if (now && !wasVisible) void refreshAll();
+      wasVisible = now;
     });
     onCleanup(unsubscribeFs);
 
-    const navigationCommands = [
-      { id: `${COMMAND_PREFIX}down`, title: "Move down", bind: "down", run: () => moveSelection(store.active()?.id ?? "", 1) },
-      { id: `${COMMAND_PREFIX}up`, title: "Move up", bind: "up", run: () => moveSelection(store.active()?.id ?? "", -1) },
+    const activeID = () => store.active()?.id ?? "";
+    const selectedRow = () => {
+      const tab = store.active();
+      return tab?.rows.find((candidate) => candidate.entry.path === tab.selected);
+    };
+
+    /**
+     * Browser shortcuts. Every bind is an alt chord OpenCode itself leaves
+     * unbound, and the layer lives in BROWSER_MODE, which is pushed only while
+     * focus is inside a browser container. Plain keys (Return, Backspace,
+     * arrows, letters) are never bound, so the prompt keeps all of them.
+     */
+    const browserCommands = [
+      { id: `${COMMAND_PREFIX}down`, title: "Move down", bind: "alt+j", run: () => moveSelection(activeID(), 1) },
+      { id: `${COMMAND_PREFIX}up`, title: "Move up", bind: "alt+k", run: () => moveSelection(activeID(), -1) },
       {
         id: `${COMMAND_PREFIX}open`,
         title: "Expand directory or open file",
-        bind: "right,return",
+        bind: "alt+l,alt+o",
         run: () => {
-          const tab = store.active();
-          const row = tab?.rows.find((candidate) => candidate.entry.path === tab.selected);
-          if (tab && row) void openEntry(tab.id, row);
+          const row = selectedRow();
+          if (row) void openEntry(activeID(), row);
         },
       },
       {
         id: `${COMMAND_PREFIX}collapse`,
         title: "Collapse directory or go up",
-        bind: "left",
+        bind: "alt+h",
         run: () => {
           const tab = store.active();
           if (!tab) return;
-          const row = tab.rows.find((candidate) => candidate.entry.path === tab.selected);
+          const row = selectedRow();
           if (row?.entry.directory && tab.expanded.includes(row.entry.path)) toggleExpand(tab.id, row.entry.path);
           else goUp(tab.id);
         },
       },
-      { id: `${COMMAND_PREFIX}parent`, title: "Go to parent directory", bind: "backspace", run: () => goUp(store.active()?.id ?? "") },
-      { id: `${COMMAND_PREFIX}refresh`, title: "Refresh tree", bind: "f5", run: () => void refreshAll() },
-      { id: `${COMMAND_PREFIX}goto`, title: "Go to directory", bind: "ctrl+g", run: () => void goToPath(store.active()?.id ?? "") },
-      { id: `${COMMAND_PREFIX}newfile`, title: "New file", bind: "ctrl+n", run: () => void createEntry(store.active()?.id ?? "") },
-      { id: `${COMMAND_PREFIX}copy`, title: "Copy selection", bind: "ctrl+c", run: () => copySelection(store.active()?.id ?? "") },
-      { id: `${COMMAND_PREFIX}paste`, title: "Paste into directory", bind: "ctrl+v", run: () => void pasteClipboard(store.active()?.id ?? "") },
-      { id: `${COMMAND_PREFIX}newtab`, title: "New browser tab", bind: "ctrl+t", run: () => newTab() },
+      { id: `${COMMAND_PREFIX}parent`, title: "Go to parent directory", bind: "alt+u", run: () => goUp(activeID()) },
+      { id: `${COMMAND_PREFIX}refresh`, title: "Refresh tree", bind: "alt+r", run: () => void refreshAll() },
+      { id: `${COMMAND_PREFIX}goto`, title: "Go to directory", bind: "alt+g", run: () => void goToPath(activeID()) },
+      { id: `${COMMAND_PREFIX}newfile`, title: "New file", bind: "alt+n", run: () => void createEntry(activeID()) },
+      { id: `${COMMAND_PREFIX}copy`, title: "Copy selection", bind: "alt+c", run: () => copySelection(activeID()) },
+      { id: `${COMMAND_PREFIX}paste`, title: "Paste into directory", bind: "alt+v", run: () => void pasteClipboard(activeID()) },
+      { id: `${COMMAND_PREFIX}newtab`, title: "New browser tab", bind: "alt+t", run: () => newTab() },
       {
         id: `${COMMAND_PREFIX}closetab`,
         title: "Close browser tab",
-        bind: "ctrl+w",
+        bind: "alt+w",
         run: () => {
           const tab = store.active();
-          if (tab && store.tabs().length > 1) store.close(tab.id);
+          if (tab && store.tabs().length > 1) closeTab(tab.id);
         },
       },
-      { id: `${COMMAND_PREFIX}nexttab`, title: "Next browser tab", bind: "ctrl+tab", run: () => store.setActiveIndex(store.activeIndex() + 1) },
-      { id: `${COMMAND_PREFIX}previoustab`, title: "Previous browser tab", bind: "ctrl+shift+tab", run: () => store.setActiveIndex(store.activeIndex() - 1) },
-      { id: `${COMMAND_PREFIX}togglepanel`, title: "Toggle browser panel", bind: "ctrl+o", run: () => togglePanel() },
+      { id: `${COMMAND_PREFIX}nexttab`, title: "Next browser tab", bind: "alt+]", run: () => store.setActiveIndex(store.activeIndex() + 1) },
+      { id: `${COMMAND_PREFIX}previoustab`, title: "Previous browser tab", bind: "alt+[", run: () => store.setActiveIndex(store.activeIndex() - 1) },
+      { id: `${COMMAND_PREFIX}togglepanel`, title: "Toggle browser panel", bind: "alt+p", run: () => togglePanel() },
     ];
 
     context.keymap.layer(() => ({
-      mode: "base",
+      mode: BROWSER_MODE,
       priority: 50,
-      // Scoped to the browser so prompt/global keys are untouched, and enabled
-      // only while it actually owns focus. A target that resolves to nothing
-      // would make the layer globally active, so `enabled` guards it too.
-      target: () => browserRenderable,
-      enabled: () => ownsFocus(browserRenderable) && !editorMode(),
-      commands: navigationCommands,
+      commands: browserCommands,
     }));
 
+    // Editor keys. The overlay runs in the host's modal mode, which also owns
+    // Esc ("Close dialog"); this layer outranks it so Esc can ask about unsaved
+    // changes first. It is enabled only while the overlay is open.
     context.keymap.layer(() => ({
-      mode: EDITOR_MODE,
+      mode: "modal",
       priority: 60,
-      enabled: () => editorMode(),
+      enabled: () => overlayOpen(),
       commands: [
-        { id: `${COMMAND_PREFIX}save`, title: "Save file", bind: "ctrl+s", run: () => void saveEditor(store.active()?.id ?? "") },
-        { id: `${COMMAND_PREFIX}closeeditor`, title: "Close editor", bind: "escape", run: () => closeEditor(store.active()?.id ?? "") },
+        {
+          id: `${COMMAND_PREFIX}save`,
+          title: "Save file",
+          bind: "ctrl+s",
+          run: () => {
+            const id = overlayTab();
+            if (id) void saveEditor(id);
+          },
+        },
+        {
+          // The host's modal Ctrl+C empties the focused textarea before it
+          // closes a dialog, which would wipe the buffer. Swallow it here unless
+          // there is a selection for the host to clear.
+          id: `${COMMAND_PREFIX}editorguard`,
+          title: "Keep editor buffer",
+          bind: "ctrl+c",
+          run: () => {
+            if (context.renderer.getSelection()) return false;
+            if (context.renderer.currentFocusedEditor?.hasSelection?.()) return false;
+          },
+        },
+        {
+          id: `${COMMAND_PREFIX}closeeditor`,
+          title: "Close editor",
+          bind: "escape",
+          run: () => {
+            const id = overlayTab();
+            if (!id) return false;
+            requestCloseEditor(id);
+          },
+        },
       ],
     }));
 
@@ -763,10 +1047,19 @@ export default Plugin.define({
           description: "Move keyboard focus to the file browser so its shortcuts apply",
           palette: true,
           run: () => {
-            const target = browserRenderable;
+            const target = browserRenderable && !browserRenderable.isDestroyed ? browserRenderable : [...containers][0];
             if (!target || target.isDestroyed) return;
+            if (sidebarCollapsed() && !panelOpen()) toggleSidebar();
             if (!target.focused) target.focus();
           },
+        },
+        {
+          id: `${COMMAND_PREFIX}togglesidebar`,
+          title: "Collapse or expand the file browser",
+          group: "File browser",
+          description: "Toggle the file browser section in the sidebar",
+          palette: true,
+          run: () => toggleSidebar(),
         },
         {
           id: `${COMMAND_PREFIX}settings`,
@@ -779,7 +1072,7 @@ export default Plugin.define({
       ],
     }));
 
-    const actions = {
+    const actions: BrowserActions = {
       openRow: (row: TreeRow) => {
         const tab = store.active();
         if (tab) void openEntry(tab.id, row);
@@ -798,20 +1091,40 @@ export default Plugin.define({
           cursorDirectory: directoryOf(row),
         }));
       },
-      saveEditor: () => void saveEditor(store.active()?.id ?? ""),
-      closeEditor: () => closeEditor(store.active()?.id ?? ""),
+      isDirty: (tabID: string) => isDirty(tabID),
+      closeTab: (tabID: string) => closeTab(tabID),
+      hasFocus: (target: Renderable | undefined) => target !== undefined && focusedContainer() === target,
       register: (target: Renderable) => {
-        browserRenderable = target;
+        containers.add(target);
+        syncBrowserMode(context.renderer.currentFocusedRenderable);
       },
       unregister: (target: Renderable) => {
+        containers.delete(target);
         if (browserRenderable === target) browserRenderable = undefined;
+        syncBrowserMode(context.renderer.currentFocusedRenderable);
       },
     };
 
     context.ui.slot({
       append: "sidebar.content",
       render: () => (
-        <Browser context={context} tokens={tokens} store={store} settings={settings} icons={icons} actions={actions} />
+        <SidebarSection
+          tokens={tokens}
+          collapsed={sidebarCollapsed}
+          onToggle={toggleSidebar}
+          title={() => store.active()?.title ?? "Files"}
+          git={() => store.active()?.git}
+        >
+          <Browser
+            context={context}
+            tokens={tokens}
+            store={store}
+            settings={settings}
+            icons={icons}
+            actions={actions}
+            maxRows={() => settings().sidebar.maxRows}
+          />
+        </SidebarSection>
       ),
     });
 
@@ -845,18 +1158,22 @@ export default Plugin.define({
       const here = context.location?.directory;
       if (here && event.location?.directory && event.location.directory !== here) return;
       const data = event.data as { path: string; mode: "reveal" | "edit" | "view" };
-      await reveal(data.path);
+      if (!(await reveal(data.path))) return;
       const active = store.active();
       if (!active) return;
-      if (data.mode === "edit") await openEditor(active.id, data.path);
-      else if (data.mode === "view") openBinary(data.path);
+      const row = active.rows.find((candidate) => candidate.entry.path === data.path);
+      // Opening goes through openEntry so protection rules and the binary sniff
+      // apply exactly as they do for a double-click.
+      if (row && data.mode !== "reveal") await openEntry(active.id, row);
     });
 
     void refresh(store.active()?.id ?? "");
 
     return () => {
       unsubscribeRpc();
-      releaseMode?.();
+      context.renderer.off("focused_renderable", onFocusChange);
+      releaseBrowserMode?.();
+      releaseBrowserMode = undefined;
     };
   },
 });
@@ -864,11 +1181,68 @@ export default Plugin.define({
 interface BrowserActions {
   openRow: (row: TreeRow) => void;
   selectRow: (row: TreeRow, modifiers: { shift?: boolean; ctrl?: boolean; meta?: boolean }) => void;
-  saveEditor: () => void;
-  closeEditor: () => void;
-  /** Publishes this instance's container as the navigation layer's target. */
+  /** True when the tab holds an editor buffer with unsaved changes. */
+  isDirty: (tabID: string) => boolean;
+  /** Closes a tab, asking first when its editor buffer has unsaved changes. */
+  closeTab: (tabID: string) => void;
+  /** Reactive: true while focus is inside the given container, so its shortcuts apply. */
+  hasFocus: (target: Renderable | undefined) => boolean;
+  /** Registers this instance's focusable container so focus inside it enables the browser keys. */
   register: (target: Renderable) => void;
   unregister: (target: Renderable) => void;
+}
+
+interface SidebarSectionProps {
+  tokens: ThemeTokens;
+  collapsed: () => boolean;
+  onToggle: () => void;
+  title: () => string;
+  git: () => GitStatus | undefined;
+  children: JSX.Element;
+}
+
+/**
+ * Bordered, collapsible sidebar section in the style of the host's own
+ * sidebar groups: a ▶/▼ header that toggles on click, with the body hidden
+ * (and its watchers paused) while collapsed.
+ */
+function SidebarSection(props: SidebarSectionProps): JSX.Element {
+  const summary = () => {
+    const git = props.git();
+    if (!git?.branch) return "";
+    const ahead = git.ahead ? ` \u2191${git.ahead}` : "";
+    const behind = git.behind ? ` \u2193${git.behind}` : "";
+    return `${git.branch}${ahead}${behind}`;
+  };
+  return (
+    <box flexDirection="column" width="100%" borderStyle="rounded" borderColor={props.tokens.textFaint} paddingLeft={1} paddingRight={1}>
+      <box
+        flexDirection="row"
+        height={1}
+        flexShrink={0}
+        gap={1}
+        onMouseDown={(event: unknown) => {
+          stopEvent(event);
+          (event as { preventDefault?: () => void } | undefined)?.preventDefault?.();
+          props.onToggle();
+        }}
+      >
+        <text fg={props.tokens.textMuted}>{props.collapsed() ? "\u25b6" : "\u25bc"}</text>
+        <text fg={props.tokens.textBase} attributes={TextAttributes.BOLD} wrapMode="none" truncate>
+          Files
+        </text>
+        <text fg={props.tokens.textMuted} wrapMode="none" truncate flexGrow={1}>
+          {props.title()}
+        </text>
+        <Show when={summary()}>
+          <text fg={props.tokens.info} wrapMode="none" truncate>
+            {summary()}
+          </text>
+        </Show>
+      </box>
+      <Show when={!props.collapsed()}>{props.children}</Show>
+    </box>
+  );
 }
 
 interface BrowserProps {
@@ -879,33 +1253,24 @@ interface BrowserProps {
   icons: () => IconSet;
   actions: BrowserActions;
   panel?: PanelInput;
+  /** Tree rows shown before scrolling; unset fills the available height. */
+  maxRows?: () => number;
 }
 
 function Browser(props: BrowserProps): JSX.Element {
   const tab = () => props.store.active();
   let lastClick: { path: string; time: number } | undefined;
-  /** This instance's focusable container, published as the keymap layer target. */
   let container: Renderable | undefined;
+  const [self, setSelf] = createSignal<Renderable | undefined>(undefined);
 
   // The host focuses the panel's own container on open, which is outside this
-  // subtree, so the scoped layer would stay inactive. Move focus inside the
-  // browser. Runs after the host's mount effect, so it wins. The sidebar is
-  // deliberately left alone: focusing it would steal the prompt's focus.
+  // subtree. Move focus inside the browser so its shortcuts apply. The sidebar
+  // is deliberately left alone: focusing it would steal the prompt's focus.
   onMount(() => {
     if (!props.panel) return;
     props.panel.focus();
     if (container && !container.isDestroyed) container.focus();
   });
-
-  /** Keeps the active tab's editor buffer in sync with an editor component. */
-  const onEditorChange = (content: string) => {
-    const current = props.store.active();
-    if (!current) return;
-    props.store.update(current.id, (state) => ({
-      ...state,
-      editor: state.editor ? { ...state.editor, content } : undefined,
-    }));
-  };
 
   const onRowMouseDown = (event: unknown, row: TreeRow) => {
     stopEvent(event);
@@ -926,110 +1291,91 @@ function Browser(props: BrowserProps): JSX.Element {
   const isRowProtected = (row: TreeRow, root: string) =>
     isProtected(row.entry.path, root, protectedRows()) !== undefined;
 
-  const hint = createMemo(() =>
-    tab()?.editor
-      ? "ctrl+s save · esc close"
-      : "\u2191\u2193 move · \u2192 open · \u2190 up · ctrl+c/v copy/paste · ctrl+o panel",
-  );
+  const focused = () => props.actions.hasFocus(self());
+  const hint = () =>
+    focused()
+      ? "alt+j/k move · alt+l open · alt+h up · alt+c/v copy/paste · alt+p panel"
+      : "click to focus · double-click opens";
+
+  const treeHeight = () => {
+    const limit = props.maxRows?.();
+    if (limit === undefined) return undefined;
+    const rows = tab()?.rows.length ?? 0;
+    return Math.max(1, Math.min(limit, rows === 0 ? 1 : rows));
+  };
 
   return (
     <box
       flexDirection="column"
       width="100%"
-      height="100%"
-      paddingLeft={1}
-      paddingRight={1}
+      height={props.panel ? "100%" : undefined}
+      paddingLeft={props.panel ? 1 : 0}
+      paddingRight={props.panel ? 1 : 0}
       focusable
       ref={(target: Renderable) => {
         container = target;
+        setSelf(target);
         props.actions.register(target);
         onCleanup(() => {
           container = undefined;
+          setSelf(undefined);
           props.actions.unregister(target);
         });
       }}
     >
       <Show when={tab()} fallback={<text fg={props.tokens.textMuted}>no browser tab</text>}>
         {(current) => (
-          <Show
-            when={!current().editor}
-            fallback={
-              <box flexDirection="column" width="100%" height="100%">
-                <Show
-                  when={current().editor!.providerModule}
-                  fallback={
-                    <PlainTextEditor
-                      tab={current().editor!}
-                      tokens={props.tokens}
-                      owner={props.context.renderer.nativeScene}
-                      onChange={onEditorChange}
-                    />
-                  }
-                >
-                  <ExternalEditor tab={current().editor!} tokens={props.tokens} onChange={onEditorChange} />
-                </Show>
-                <box flexDirection="row" height={1} flexShrink={0} gap={1}>
-                  <text fg={props.tokens.textMuted}>
-                    {`${path.basename(current().editor!.path)} · ${
-                      current().editor!.content === current().editor!.saved ? "saved" : "modified"
-                    }`}
-                  </text>
-                  <text fg={props.tokens.textFaint}>
-                    {current().editor!.readOnly ? "read-only" : current().editor!.providerId}
-                  </text>
-                </box>
-              </box>
-            }
-          >
-            <box flexDirection="column" width="100%" height="100%">
-              <TabStrip
-                tabs={props.store.tabs()}
-                activeIndex={props.store.activeIndex()}
-                tokens={props.tokens}
-                onSelect={(index) => props.store.setActiveIndex(index)}
-                onClose={(index) => props.store.close(props.store.tabs()[index]?.id ?? "")}
-              />
-              <Breadcrumb
-                path={current().root}
-                tokens={props.tokens}
-                branch={current().git?.branch}
-                truncated={current().truncated}
-              />
-              <scrollbox width="100%" flexGrow={1}>
-                <For each={current().rows}>
-                  {(row) => (
-                    <TreeRowView
-                      row={row}
-                      tokens={props.tokens}
-                      icons={props.icons()}
-                      selected={current().selected === row.entry.path}
-                      alsoSelected={current().extraSelection.includes(row.entry.path)}
-                      status={current().git?.entries.get(row.entry.path)}
-                      protected={isRowProtected(row, current().root)}
-                      showBadges={props.settings().git.badges}
-                      onMouseDown={onRowMouseDown}
-                    />
-                  )}
-                </For>
-                <Show when={current().rows.length === 0 && !current().loading}>
-                  <text fg={props.tokens.textMuted}>empty directory</text>
-                </Show>
-                <Show when={current().loading}>
-                  <text fg={props.tokens.textMuted}>loading…</text>
-                </Show>
-                <Show when={current().error}>
-                  <text fg={props.tokens.error}>{current().error}</text>
-                </Show>
-              </scrollbox>
-              <Footer
-                tokens={props.tokens}
-                message={`${current().rows.length} entries${
-                  current().selected ? ` · ${path.basename(current().selected!)}` : ""
-                }`}
-                hint={hint()}
-              />
-            </box>
-          </Show>
+          <box flexDirection="column" width="100%" height={props.panel ? "100%" : undefined}>
+            <TabStrip
+              tabs={props.store.tabs()}
+              activeIndex={props.store.activeIndex()}
+              tokens={props.tokens}
+              isDirty={props.actions.isDirty}
+              onSelect={(index) => props.store.setActiveIndex(index)}
+              onClose={(index) => props.actions.closeTab(props.store.tabs()[index]?.id ?? "")}
+            />
+            <Breadcrumb
+              path={current().root}
+              tokens={props.tokens}
+              branch={current().git?.branch}
+              ahead={current().git?.ahead}
+              behind={current().git?.behind}
+              truncated={current().truncated}
+            />
+            <scrollbox width="100%" flexGrow={props.panel ? 1 : 0} height={treeHeight()}>
+              <For each={current().rows}>
+                {(row) => (
+                  <TreeRowView
+                    row={row}
+                    tokens={props.tokens}
+                    icons={props.icons()}
+                    selected={current().selected === row.entry.path}
+                    alsoSelected={current().extraSelection.includes(row.entry.path)}
+                    status={statusFor(current().git, row.entry.path, row.entry.directory)}
+                    protected={isRowProtected(row, current().root)}
+                    showBadges={props.settings().git.badges}
+                    palette={props.settings().git.palette}
+                    showUnpushed={props.settings().git.showUnpushed}
+                    onMouseDown={onRowMouseDown}
+                  />
+                )}
+              </For>
+              <Show when={current().rows.length === 0 && !current().loading}>
+                <text fg={props.tokens.textMuted}>empty directory</text>
+              </Show>
+              <Show when={current().loading && current().rows.length === 0}>
+                <text fg={props.tokens.textMuted}>loading…</text>
+              </Show>
+              <Show when={current().error}>
+                <text fg={props.tokens.error}>{current().error}</text>
+              </Show>
+            </scrollbox>
+            <Footer
+              tokens={props.tokens}
+              message={`${current().rows.length} entries${current().selected ? ` · ${path.basename(current().selected!)}` : ""}`}
+              hint={hint()}
+            />
+          </box>
         )}
       </Show>
       <Show when={props.panel}>
@@ -1041,7 +1387,7 @@ function Browser(props: BrowserProps): JSX.Element {
               props.panel?.focus();
             }}
           >
-            {props.panel?.focused ? "focused · ctrl+o closes" : "click to focus"}
+            {props.panel?.focused ? "focused · alt+p closes" : "click to focus"}
           </text>
         </box>
       </Show>

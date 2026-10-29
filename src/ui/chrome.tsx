@@ -16,6 +16,8 @@ export interface TabStripProps {
   tabs: readonly TabState[];
   activeIndex: number;
   tokens: ThemeTokens;
+  /** Reports unsaved editor changes for a tab, marked with * in the strip. */
+  isDirty?: (tabID: string) => boolean;
   onSelect: (index: number) => void;
   onClose: (index: number) => void;
 }
@@ -27,7 +29,8 @@ export function TabStrip(props: TabStripProps): JSX.Element {
       <For each={props.tabs}>
         {(tab, index) => {
           const active = () => index() === props.activeIndex;
-          const dirty = () => tab.editor !== undefined && tab.editor.content !== tab.editor.saved;
+          const dirty = () =>
+            props.isDirty ? props.isDirty(tab.id) : tab.editor !== undefined && tab.editor.content !== tab.editor.saved;
           return (
             <box flexDirection="row">
               <text
@@ -67,6 +70,10 @@ export interface BreadcrumbProps {
   path: string;
   tokens: ThemeTokens;
   branch?: string;
+  /** Commits on HEAD not yet on the upstream. */
+  ahead?: number;
+  /** Commits on the upstream not yet on HEAD. */
+  behind?: number;
   truncated?: boolean;
 }
 
@@ -83,7 +90,7 @@ export function Breadcrumb(props: BreadcrumbProps): JSX.Element {
         {label()}
       </text>
       <Show when={props.branch}>
-        <text fg={props.tokens.info} wrapMode="none" truncate>{`  \u2387 ${props.branch}`}</text>
+        <text fg={props.tokens.info} wrapMode="none" truncate>{`  \u2387 ${props.branch}${props.ahead ? ` \u2191${props.ahead}` : ""}${props.behind ? ` \u2193${props.behind}` : ""}`}</text>
       </Show>
       <Show when={props.truncated}>
         <text fg={props.tokens.warning} wrapMode="none" truncate>{"  truncated"}</text>

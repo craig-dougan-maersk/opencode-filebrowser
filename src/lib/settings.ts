@@ -17,10 +17,23 @@ export interface IconSettings {
   folders: boolean;
 }
 
+export type GitPaletteName = "jetbrains" | "vscode";
+
 export interface GitSettings {
   enabled: boolean;
   badges: boolean;
   timeoutMs: number;
+  /** Colour scheme for file states: JetBrains IDEs or VS Code. */
+  palette: GitPaletteName;
+  /** Mark files changed by commits that are not pushed yet with ↑. */
+  showUnpushed: boolean;
+}
+
+export interface SidebarSettings {
+  /** Start the sidebar section collapsed the first time it is shown. */
+  collapsedByDefault: boolean;
+  /** Tree rows shown in the sidebar before it scrolls. */
+  maxRows: number;
 }
 
 export interface WatchSettings {
@@ -60,6 +73,7 @@ export interface FilebrowserSettings {
   root: RootSettings;
   icons: IconSettings;
   git: GitSettings;
+  sidebar: SidebarSettings;
   ignore: string[];
   watch: WatchSettings;
   editor: EditorSettings;
@@ -72,7 +86,8 @@ export interface FilebrowserSettings {
 export const DEFAULT_SETTINGS: FilebrowserSettings = {
   root: { mode: "session", path: null, allowAbove: true },
   icons: { style: "nerdfont", folders: true },
-  git: { enabled: true, badges: true, timeoutMs: 4000 },
+  git: { enabled: true, badges: true, timeoutMs: 4000, palette: "jetbrains", showUnpushed: true },
+  sidebar: { collapsedByDefault: false, maxRows: 20 },
   ignore: ["node_modules/", ".git/", "dist/", ".DS_Store"],
   watch: { enabled: true, debounceMs: 300 },
   editor: {
@@ -84,7 +99,7 @@ export const DEFAULT_SETTINGS: FilebrowserSettings = {
   binaryViewer: { command: "fileviewer.view", fallback: ["system-open", "hex"] },
   protect: ["**/*.env", "**/.ssh/**", "**/secrets/**", "**/*.pem", "**/id_rsa"],
   confirmOverwrite: true,
-  keybinds: { copy: "ctrl+c", paste: "ctrl+v", refresh: "r" },
+  keybinds: { copy: "alt+c", paste: "alt+v", refresh: "alt+r" },
 };
 
 /** Absolute path of the settings file, honouring XDG_CONFIG_HOME. */
@@ -150,6 +165,14 @@ export function mergeSettings(raw: unknown): FilebrowserSettings {
     enabled: pickBoolean(git.enabled, base.git.enabled),
     badges: pickBoolean(git.badges, base.git.badges),
     timeoutMs: pickNumber(git.timeoutMs, base.git.timeoutMs, 100),
+    palette: pickOneOf(git.palette, ["jetbrains", "vscode"] as const, base.git.palette),
+    showUnpushed: pickBoolean(git.showUnpushed, base.git.showUnpushed),
+  };
+
+  const sidebar = isRecord(raw.sidebar) ? raw.sidebar : {};
+  base.sidebar = {
+    collapsedByDefault: pickBoolean(sidebar.collapsedByDefault, base.sidebar.collapsedByDefault),
+    maxRows: Math.floor(pickNumber(sidebar.maxRows, base.sidebar.maxRows, 3)),
   };
 
   base.ignore = pickStringArray(raw.ignore, base.ignore);
@@ -235,7 +258,7 @@ export function describeSettings(settings: FilebrowserSettings): string {
   return [
     `root ${settings.root.mode}${settings.root.path ? ` (${settings.root.path})` : ""}`,
     `icons ${settings.icons.style}`,
-    `git ${settings.git.enabled ? "on" : "off"}`,
+    `git ${settings.git.enabled ? settings.git.palette : "off"}`,
     `editor ${settings.editor.default}`,
     `viewer ${settings.binaryViewer.command}`,
   ].join(" · ");

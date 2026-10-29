@@ -11,7 +11,8 @@ export interface PasteSource {
 
 export type PasteAction =
   | { kind: "copy"; source: string; destination: string }
-  | { kind: "rename"; source: string; destination: string; reason: "same-directory" | "exists" };
+  | { kind: "rename"; source: string; destination: string; reason: "same-directory" | "exists" }
+  | { kind: "skip"; source: string; destination: string; reason: "into-itself" };
 
 export interface PastePlanInput {
   sources: readonly PasteSource[];
@@ -21,18 +22,29 @@ export interface PastePlanInput {
   exists: (candidate: string) => Promise<boolean>;
 }
 
+function contains(parent: string, target: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(target));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 /**
  * Decides what happens to each copied entry.
  *
  * - pasting into the directory the entry came from always asks for a new name;
  * - pasting elsewhere copies silently when the name is free;
- * - pasting elsewhere asks for a new name when the name is taken.
+ * - pasting elsewhere asks for a new name when the name is taken;
+ * - a directory is never pasted into itself or one of its descendants, which
+ *   would otherwise recurse until the disk fills.
  */
 export async function planPaste(input: PastePlanInput): Promise<PasteAction[]> {
   const actions: PasteAction[] = [];
   for (const source of input.sources) {
     const name = path.basename(source.path);
     const destination = path.join(input.targetDirectory, name);
+    if (source.directory && contains(source.path, input.targetDirectory)) {
+      actions.push({ kind: "skip", source: source.path, destination, reason: "into-itself" });
+      continue;
+    }
     if (path.resolve(source.sourceDirectory) === path.resolve(input.targetDirectory)) {
       actions.push({ kind: "rename", source: source.path, destination, reason: "same-directory" });
       continue;

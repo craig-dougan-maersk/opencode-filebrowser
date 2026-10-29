@@ -28,7 +28,7 @@ export function TabStrip(props) {
       },
       children: (tab, index) => {
         const active = () => index() === props.activeIndex;
-        const dirty = () => tab.editor !== undefined && tab.editor.content !== tab.editor.saved;
+        const dirty = () => props.isDirty ? props.isDirty(tab.id) : tab.editor !== undefined && tab.editor.content !== tab.editor.saved;
         return (() => {
           var _el$2 = _$createElement("box"),
             _el$3 = _$createElement("text");
@@ -100,7 +100,7 @@ export function Breadcrumb(props) {
         var _el$8 = _$createElement("text");
         _$setProp(_el$8, "wrapMode", "none");
         _$setProp(_el$8, "truncate", true);
-        _$insert(_el$8, () => `  \u2387 ${props.branch}`);
+        _$insert(_el$8, () => `  \u2387 ${props.branch}${props.ahead ? ` \u2191${props.ahead}` : ""}${props.behind ? ` \u2193${props.behind}` : ""}`);
         _$effect(_$p => _$setProp(_el$8, "fg", props.tokens.info, _$p));
         return _el$8;
       }

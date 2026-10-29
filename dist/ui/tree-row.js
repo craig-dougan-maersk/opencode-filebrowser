@@ -8,77 +8,50 @@ import { TextAttributes } from "@opentui/core";
 import { Show } from "solid-js";
 import { iconFor } from "../lib/icons.js";
 import { badgeFor } from "../lib/git.js";
+import { paletteStyle } from "../lib/palette.js";
 const BOLD = TextAttributes.BOLD;
 const ITALIC = TextAttributes.ITALIC;
 const STRIKETHROUGH = TextAttributes.STRIKETHROUGH;
 const DIM = TextAttributes.DIM;
-
 /**
- * Maps git status to colour plus a non-colour attribute, so the state survives
- * a monochrome terminal. Untracked and added are bold, modified italic, deleted
- * struck through, conflicted bold and struck through.
+ * Maps git status to a palette colour plus a non-colour attribute, so the
+ * state survives a monochrome terminal. Directories inherit the most severe
+ * child status; the ↑ marker flags committed changes not yet pushed.
  */
 export function rowStyleFor(tokens, status, options) {
-  const badge = options.showBadge ? badgeFor(status) : "";
-  if (!status) {
+  const showUnpushed = options.showUnpushed !== false;
+  const visible = status && !showUnpushed && status.unpushed ? {
+    ...status,
+    unpushed: false
+  } : status;
+  let badge = options.showBadge ? badgeFor(visible) : "";
+  if (!options.showBadge && showUnpushed && visible?.unpushed) badge = "↑";
+  const style = paletteStyle(options.palette ?? "jetbrains", visible);
+  if (!style) {
     return {
       fg: options.directory ? tokens.textPrimary : tokens.textBase,
       attributes: options.directory ? BOLD : TextAttributes.NONE,
       badge
     };
   }
-  switch (status.code) {
-    case "untracked":
-    case "added":
-      return {
-        fg: tokens.success,
-        attributes: BOLD,
-        badge
-      };
-    case "modified":
-      return {
-        fg: tokens.warning,
-        attributes: ITALIC,
-        badge
-      };
-    case "deleted":
-      return {
-        fg: tokens.error,
-        attributes: STRIKETHROUGH,
-        badge
-      };
-    case "conflict":
-      return {
-        fg: tokens.error,
-        attributes: BOLD | STRIKETHROUGH,
-        badge
-      };
-    case "renamed":
-    case "copied":
-      return {
-        fg: tokens.info,
-        attributes: ITALIC,
-        badge
-      };
-    case "ignored":
-      return {
-        fg: tokens.textFaint,
-        attributes: DIM,
-        badge
-      };
-    default:
-      return {
-        fg: tokens.textBase,
-        attributes: TextAttributes.NONE,
-        badge
-      };
-  }
+  let attributes = options.directory ? BOLD : TextAttributes.NONE;
+  if (style.bold) attributes |= BOLD;
+  if (style.italic) attributes |= ITALIC;
+  if (style.strikethrough) attributes |= STRIKETHROUGH;
+  if (style.dim) attributes |= DIM;
+  return {
+    fg: style.color,
+    attributes,
+    badge
+  };
 }
 /** One tree line: indent, icon, name, optional git badge. */
 export function TreeRowView(props) {
   const style = () => rowStyleFor(props.tokens, props.status, {
     directory: props.row.entry.directory,
-    showBadge: props.showBadges
+    showBadge: props.showBadges,
+    palette: props.palette,
+    showUnpushed: props.showUnpushed
   });
   const label = () => {
     const indent = "  ".repeat(props.row.depth);

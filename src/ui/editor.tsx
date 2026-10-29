@@ -10,6 +10,8 @@ export interface EditorProps {
   owner: unknown;
   /** Called whenever the buffer changes, so the tab can track dirtiness. */
   onChange: (content: string) => void;
+  /** True while the overlay is asking a question; the textarea gives up focus. */
+  suspended?: boolean;
 }
 
 const FILETYPES: Record<string, string> = {
@@ -49,10 +51,11 @@ export function filetypeOf(file: string): string {
 }
 
 /**
- * Built-in plain-text editor. A textarea captures input while the exclusive
- * editor keymap mode is active. A file that exceeded the inline size limit is
+ * Built-in plain-text editor body. The overlay around it owns the title, the
+ * dirty marker and the key hints. A file that exceeded the inline size limit is
  * shown read-only in a code view, so a truncated buffer can never be saved back
- * over the original.
+ * over the original. `suspended` moves focus off the textarea while the overlay
+ * asks a question, so the answer keys are not typed into the buffer.
  */
 export function PlainTextEditor(props: EditorProps): JSX.Element {
   const [textarea, setTextarea] = createSignal<TextareaRenderable | undefined>(undefined);
@@ -63,45 +66,33 @@ export function PlainTextEditor(props: EditorProps): JSX.Element {
     void syntax.destroy();
   });
 
-  // The textarea is the only focusable element here, so focus it once mounted.
   createEffect(() => {
-    textarea()?.focus();
+    const target = textarea();
+    if (!target || target.isDestroyed) return;
+    if (props.suspended) target.blur();
+    else target.focus();
   });
 
-  const label = () => props.tab.path.split("/").pop() ?? props.tab.path;
-  const state = () => (props.tab.readOnly ? "read-only" : props.tab.content === props.tab.saved ? "saved" : "modified");
-
   return (
-    <box flexDirection="column" width="100%" height="100%">
-      <box flexDirection="row" height={1} flexShrink={0} gap={1}>
-        <text fg={props.tokens.textBase}>{label()}</text>
-        <text fg={props.tab.readOnly ? props.tokens.warning : props.tokens.textFaint}>{state()}</text>
-      </box>
-      <Show
-        when={!props.tab.readOnly}
-        fallback={
-          <scrollbox width="100%" flexGrow={1}>
-            <code content={props.tab.content} filetype={filetypeOf(props.tab.path)} syntaxStyle={syntax} />
-          </scrollbox>
-        }
-      >
-        <textarea
-          ref={(value: TextareaRenderable) => setTextarea(value)}
-          initialValue={props.tab.content}
-          width="100%"
-          flexGrow={1}
-          textColor={props.tokens.textBase}
-          backgroundColor={props.tokens.backgroundBase}
-          focusedTextColor={props.tokens.textBase}
-          focusedBackgroundColor={props.tokens.backgroundRaised}
-          onContentChange={() => props.onChange(textarea()?.plainText ?? props.tab.content)}
-        />
-      </Show>
-      <box flexDirection="row" height={1} flexShrink={0}>
-        <text fg={props.tokens.textFaint}>
-          {props.tab.tooLarge ? "file exceeds the inline size limit; read-only" : "ctrl+s save · esc close"}
-        </text>
-      </box>
-    </box>
+    <Show
+      when={!props.tab.readOnly}
+      fallback={
+        <scrollbox width="100%" flexGrow={1}>
+          <code content={props.tab.content} filetype={filetypeOf(props.tab.path)} syntaxStyle={syntax} />
+        </scrollbox>
+      }
+    >
+      <textarea
+        ref={(value: TextareaRenderable) => setTextarea(value)}
+        initialValue={props.tab.content}
+        width="100%"
+        flexGrow={1}
+        textColor={props.tokens.textBase}
+        backgroundColor={props.tokens.backgroundBase}
+        focusedTextColor={props.tokens.textBase}
+        focusedBackgroundColor={props.tokens.backgroundBase}
+        onContentChange={() => props.onChange(textarea()?.plainText ?? props.tab.content)}
+      />
+    </Show>
   );
 }

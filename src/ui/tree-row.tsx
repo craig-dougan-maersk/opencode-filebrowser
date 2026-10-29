@@ -3,6 +3,7 @@ import type { JSX } from "solid-js";
 import { Show } from "solid-js";
 import { iconFor, type IconSet } from "../lib/icons";
 import { badgeFor, type GitStatusEntry } from "../lib/git";
+import { paletteStyle, type GitPalette } from "../lib/palette";
 import type { TreeRow } from "../lib/fs-tree";
 import type { ThemeColor, ThemeTokens } from "../lib/theme";
 
@@ -17,42 +18,39 @@ const ITALIC = TextAttributes.ITALIC;
 const STRIKETHROUGH = TextAttributes.STRIKETHROUGH;
 const DIM = TextAttributes.DIM;
 
+export interface RowStyleOptions {
+  directory: boolean;
+  showBadge: boolean;
+  /** Colour scheme for git states; defaults to JetBrains. */
+  palette?: GitPalette;
+  /** Show the ↑ marker on files changed by unpushed commits. */
+  showUnpushed?: boolean;
+}
+
 /**
- * Maps git status to colour plus a non-colour attribute, so the state survives
- * a monochrome terminal. Untracked and added are bold, modified italic, deleted
- * struck through, conflicted bold and struck through.
+ * Maps git status to a palette colour plus a non-colour attribute, so the
+ * state survives a monochrome terminal. Directories inherit the most severe
+ * child status; the ↑ marker flags committed changes not yet pushed.
  */
-export function rowStyleFor(
-  tokens: ThemeTokens,
-  status: GitStatusEntry | undefined,
-  options: { directory: boolean; showBadge: boolean },
-): RowStyle {
-  const badge = options.showBadge ? badgeFor(status) : "";
-  if (!status) {
+export function rowStyleFor(tokens: ThemeTokens, status: GitStatusEntry | undefined, options: RowStyleOptions): RowStyle {
+  const showUnpushed = options.showUnpushed !== false;
+  const visible = status && !showUnpushed && status.unpushed ? { ...status, unpushed: false } : status;
+  let badge = options.showBadge ? badgeFor(visible) : "";
+  if (!options.showBadge && showUnpushed && visible?.unpushed) badge = "↑";
+  const style = paletteStyle(options.palette ?? "jetbrains", visible);
+  if (!style) {
     return {
       fg: options.directory ? tokens.textPrimary : tokens.textBase,
       attributes: options.directory ? BOLD : TextAttributes.NONE,
       badge,
     };
   }
-  switch (status.code) {
-    case "untracked":
-    case "added":
-      return { fg: tokens.success, attributes: BOLD, badge };
-    case "modified":
-      return { fg: tokens.warning, attributes: ITALIC, badge };
-    case "deleted":
-      return { fg: tokens.error, attributes: STRIKETHROUGH, badge };
-    case "conflict":
-      return { fg: tokens.error, attributes: BOLD | STRIKETHROUGH, badge };
-    case "renamed":
-    case "copied":
-      return { fg: tokens.info, attributes: ITALIC, badge };
-    case "ignored":
-      return { fg: tokens.textFaint, attributes: DIM, badge };
-    default:
-      return { fg: tokens.textBase, attributes: TextAttributes.NONE, badge };
-  }
+  let attributes = options.directory ? BOLD : TextAttributes.NONE;
+  if (style.bold) attributes |= BOLD;
+  if (style.italic) attributes |= ITALIC;
+  if (style.strikethrough) attributes |= STRIKETHROUGH;
+  if (style.dim) attributes |= DIM;
+  return { fg: style.color, attributes, badge };
 }
 
 export interface TreeRowProps {
@@ -66,6 +64,8 @@ export interface TreeRowProps {
   status: GitStatusEntry | undefined;
   protected: boolean;
   showBadges: boolean;
+  palette: GitPalette;
+  showUnpushed: boolean;
   onMouseDown: (event: unknown, row: TreeRow) => void;
 }
 
@@ -75,6 +75,8 @@ export function TreeRowView(props: TreeRowProps): JSX.Element {
     rowStyleFor(props.tokens, props.status, {
       directory: props.row.entry.directory,
       showBadge: props.showBadges,
+      palette: props.palette,
+      showUnpushed: props.showUnpushed,
     });
 
   const label = () => {

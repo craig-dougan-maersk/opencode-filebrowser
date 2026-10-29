@@ -7,7 +7,8 @@ import test from "node:test";
 import { looksBinary, extensionOf, isBinaryExtension, isTextExtension, SNIFF_BYTES } from "../dist/lib/binary.js";
 import { isSafeName, planPaste, suggestName } from "../dist/lib/clipboard.js";
 import { ancestorsOf, compileIgnore, createBudget, flattenTree, isIgnored, isWithin, readDirectory, resolveRoot } from "../dist/lib/fs-tree.js";
-import { badgeFor, parsePorcelainZ } from "../dist/lib/git.js";
+import { aggregateDirectories, badgeFor, parsePorcelainV2, parsePorcelainZ, statusFor } from "../dist/lib/git.js";
+import { paletteStyle } from "../dist/lib/palette.js";
 import { iconFor, iconSet } from "../dist/lib/icons.js";
 import { compileGlob, compileProtection, isProtected } from "../dist/lib/protect.js";
 import { buildRegistry, compileMapping, resolveProvider } from "../dist/lib/providers.js";
@@ -28,7 +29,8 @@ test("mergeSettings applies valid overrides and keeps the rest", () => {
   const merged = mergeSettings({
     root: { mode: "path", path: "/tmp/work", allowAbove: false },
     icons: { style: "unicode", folders: false },
-    git: { enabled: false, badges: false, timeoutMs: 250 },
+    git: { enabled: false, badges: false, timeoutMs: 250, palette: "vscode", showUnpushed: false },
+    sidebar: { collapsedByDefault: true, maxRows: 12 },
     ignore: ["target/"],
     watch: { enabled: false, debounceMs: 50 },
     editor: {
@@ -44,7 +46,8 @@ test("mergeSettings applies valid overrides and keeps the rest", () => {
   });
   assert.deepEqual(merged.root, { mode: "path", path: "/tmp/work", allowAbove: false });
   assert.deepEqual(merged.icons, { style: "unicode", folders: false });
-  assert.deepEqual(merged.git, { enabled: false, badges: false, timeoutMs: 250 });
+  assert.deepEqual(merged.git, { enabled: false, badges: false, timeoutMs: 250, palette: "vscode", showUnpushed: false });
+  assert.deepEqual(merged.sidebar, { collapsedByDefault: true, maxRows: 12 });
   assert.deepEqual(merged.ignore, ["target/"]);
   assert.deepEqual(merged.watch, { enabled: false, debounceMs: 50 });
   assert.equal(merged.editor.default, "vim");
@@ -447,4 +450,162 @@ test("syntaxStyleMap exposes the tokens the editor highlights with", () => {
     "comment", "default", "function", "keyword", "number", "operator", "punctuation", "string", "type", "variable",
   ]);
   assert.equal(map.default.fg, tokens.textBase);
+});
+
+// ---------------------------------------------------------------- git v2, palette, paste skip
+
+test("mergeSettings rejects an unknown palette and a tiny sidebar", () => {
+  const merged = mergeSettings({ git: { palette: "emacs" }, sidebar: { maxRows: 1, collapsedByDefault: "yes" } });
+  assert.equal(merged.git.palette, "jetbrains");
+  assert.equal(merged.sidebar.maxRows, DEFAULT_SETTINGS.sidebar.maxRows);
+  assert.equal(merged.sidebar.collapsedByDefault, false);
+  assert.deepEqual(DEFAULT_SETTINGS.keybinds, { copy: "alt+c", paste: "alt+v", refresh: "alt+r" });
+});
+
+test("parsePorcelainV2 reads branch headers and every record kind", () => {
+  const output = [
+    "# branch.oid 1234",
+    "# branch.head main",
+    "# branch.upstream origin/main",
+    "# branch.ab +2 -1",
+    "1 M. N... 100644 100644 100644 aaa bbb src/staged.ts",
+    "1 .M N... 100644 100644 100644 aaa bbb src/dirty file.ts",
+    "2 R. N... 100644 100644 100644 aaa bbb R100 src/new.ts",
+    "src/old.ts",
+    "u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.ts",
+    "? notes.txt",
+    "? fresh/",
+    "! build/",
+    "",
+  ].join("\0");
+  const parsed = parsePorcelainV2(output, "/repo");
+  assert.equal(parsed.branch, "main");
+  assert.equal(parsed.upstream, "origin/main");
+  assert.equal(parsed.ahead, 2);
+  assert.equal(parsed.behind, 1);
+  const staged = parsed.entries.get("/repo/src/staged.ts");
+  assert.equal(staged.code, "modified");
+  assert.equal(staged.staged, true);
+  assert.equal(staged.unstaged, false);
+  assert.equal(parsed.entries.get("/repo/src/dirty file.ts").unstaged, true);
+  assert.equal(parsed.entries.get("/repo/src/new.ts").code, "renamed");
+  assert.equal(parsed.entries.has("/repo/src/old.ts"), false);
+  assert.equal(parsed.entries.get("/repo/conflict.ts").code, "conflict");
+  assert.equal(parsed.entries.get("/repo/notes.txt").code, "untracked");
+  assert.deepEqual(parsed.ignoredDirectories, ["/repo/build/"]);
+  assert.deepEqual(parsed.untrackedDirectories, ["/repo/fresh/"]);
+  assert.equal(parsed.entries.get("/repo/fresh").code, "untracked");
+});
+
+test("parsePorcelainV2 reports a detached head", () => {
+  assert.equal(parsePorcelainV2("# branch.head (detached)\0", "/r").branch, "detached");
+});
+
+test("aggregateDirectories rolls up the most severe child and the unpushed flag", () => {
+  const entries = new Map([
+    ["/repo/a/b/one.ts", { code: "untracked", raw: "??" }],
+    ["/repo/a/two.ts", { code: "modified", raw: " M" }],
+    ["/repo/c/ignored.log", { code: "ignored", raw: "!!" }],
+  ]);
+  const directories = aggregateDirectories(entries, new Set(["/repo/d/e/pushed.ts"]), "/repo");
+  assert.equal(directories.get("/repo/a/b").code, "untracked");
+  assert.equal(directories.get("/repo/a").code, "modified");
+  assert.equal(directories.get("/repo").code, "modified");
+  assert.equal(directories.get("/repo/a").aggregate, true);
+  assert.equal(directories.has("/repo/c"), false);
+  assert.equal(directories.get("/repo/d/e").unpushed, true);
+  assert.equal(directories.get("/repo").unpushed, true);
+  assert.equal(directories.has("/"), false);
+});
+
+test("aggregateDirectories does not climb into a sibling with a shared prefix", () => {
+  const directories = aggregateDirectories(new Map([["/repo-other/x.ts", { code: "added", raw: "A " }]]), new Set(), "/repo");
+  assert.equal(directories.size, 0);
+});
+
+test("statusFor resolves own, rolled-up, ignored and unpushed-only states", () => {
+  const status = {
+    entries: new Map([["/r/f.ts", { code: "modified", raw: " M" }]]),
+    unpushed: new Set(["/r/f.ts", "/r/clean.ts"]),
+    ignoredDirectories: ["/r/build/"],
+    untrackedDirectories: ["/r/new/"],
+    directories: new Map([["/r/src", { code: "added", raw: "", aggregate: true }]]),
+  };
+  assert.equal(statusFor(status, "/r/f.ts", false).unpushed, true);
+  assert.equal(statusFor(status, "/r/src", true).code, "added");
+  assert.equal(statusFor(status, "/r/src", false), undefined);
+  assert.equal(statusFor(status, "/r/build/out.js", false).code, "ignored");
+  assert.equal(statusFor(status, "/r/buildx", true), undefined);
+  assert.equal(statusFor(status, "/r/new/deep/x.ts", false).code, "untracked");
+  assert.deepEqual(statusFor(status, "/r/clean.ts", false), { code: "unknown", raw: "", unpushed: true });
+  assert.equal(statusFor(undefined, "/r/f.ts", false), undefined);
+});
+
+test("badgeFor appends the unpushed arrow", () => {
+  assert.equal(badgeFor({ code: "modified", raw: " M", unpushed: true }), "M\u2191");
+  assert.equal(badgeFor({ code: "unknown", raw: "", unpushed: true }), "\u2191");
+  assert.equal(badgeFor({ code: "modified", raw: "", aggregate: true }), "");
+  assert.equal(badgeFor({ code: "modified", raw: "", aggregate: true, unpushed: true }), "\u2191");
+});
+
+test("paletteStyle maps states to JetBrains and VS Code colours", () => {
+  assert.equal(paletteStyle("jetbrains", { code: "modified", raw: " M" }).color, "#6897BB");
+  assert.equal(paletteStyle("vscode", { code: "modified", raw: " M" }).color, "#E2C08D");
+  assert.equal(paletteStyle("jetbrains", { code: "untracked", raw: "??", staged: false, unstaged: true }).bold, false);
+  assert.equal(paletteStyle("jetbrains", { code: "added", raw: "A ", staged: true, unstaged: false }).bold, true);
+  assert.equal(paletteStyle("jetbrains", { code: "deleted", raw: " D" }).strikethrough, true);
+  assert.equal(paletteStyle("vscode", { code: "deleted", raw: "", aggregate: true }).strikethrough, undefined);
+  assert.equal(paletteStyle("jetbrains", { code: "unknown", raw: "" }), undefined);
+  assert.equal(paletteStyle("jetbrains", undefined), undefined);
+  assert.equal(paletteStyle("nope", { code: "modified", raw: " M" }).color, "#6897BB");
+});
+
+test("planPaste refuses to paste a directory into itself or a descendant", async () => {
+  const actions = await planPaste({
+    sources: [
+      { path: "/w/dir", sourceDirectory: "/w", directory: true },
+      { path: "/w/file.txt", sourceDirectory: "/w", directory: false },
+    ],
+    targetDirectory: "/w/dir/sub",
+    exists: async () => false,
+  });
+  assert.equal(actions[0].kind, "skip");
+  assert.equal(actions[0].reason, "into-itself");
+  assert.equal(actions[1].kind, "copy");
+  const self = await planPaste({
+    sources: [{ path: "/w/dir", sourceDirectory: "/w", directory: true }],
+    targetDirectory: "/w/dir",
+    exists: async () => false,
+  });
+  assert.equal(self[0].kind, "skip");
+  const sibling = await planPaste({
+    sources: [{ path: "/w/dir", sourceDirectory: "/w", directory: true }],
+    targetDirectory: "/w/dir2",
+    exists: async () => false,
+  });
+  assert.equal(sibling[0].kind, "copy");
+});
+
+test("readGitStatus maps paths onto a symlinked root", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { readGitStatus } = await import("../dist/lib/git.js");
+  const base = await mkdtemp(join(tmpdir(), "fb-git-"));
+  try {
+    const real = join(base, "real");
+    await mkdir(real);
+    execFileSync("git", ["init", "-q"], { cwd: real });
+    await writeFile(join(real, "new.txt"), "x");
+    const link = join(base, "link");
+    await symlink(real, link);
+    const status = await readGitStatus(link, 4000);
+    assert.equal(status.root, link);
+    assert.equal(status.entries.get(join(link, "new.txt"))?.code, "untracked");
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("aggregateDirectories handles a filesystem-root repository", () => {
+  const directories = aggregateDirectories(new Map([["/a/b.ts", { code: "added", raw: "A " }]]), new Set(), "/");
+  assert.equal(directories.get("/a").code, "added");
 });

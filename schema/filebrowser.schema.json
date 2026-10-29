@@ -12,12 +12,19 @@
       "description": "Which directory the browser may show and how far it may navigate.",
       "properties": {
         "mode": {
-          "enum": ["session", "path", "unrestricted"],
+          "enum": [
+            "session",
+            "path",
+            "unrestricted"
+          ],
           "default": "session",
           "description": "session: the directory of the active session. path: the configured path. unrestricted: the configured path or the session directory, with no containment check."
         },
         "path": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "default": null,
           "description": "Directory used by the path and unrestricted modes. A leading ~ is expanded."
         },
@@ -33,7 +40,10 @@
       "additionalProperties": false,
       "properties": {
         "style": {
-          "enum": ["nerdfont", "unicode"],
+          "enum": [
+            "nerdfont",
+            "unicode"
+          ],
           "default": "nerdfont",
           "description": "nerdfont requires a patched font; unicode is the portable fallback."
         },
@@ -63,13 +73,51 @@
           "minimum": 100,
           "default": 4000,
           "description": "How long to wait for git status before giving up."
+        },
+        "palette": {
+          "type": "string",
+          "enum": [
+            "jetbrains",
+            "vscode"
+          ],
+          "default": "jetbrains",
+          "description": "Colour scheme for file states. jetbrains: modified blue, untracked red-brown, added green. vscode: modified amber, untracked green."
+        },
+        "showUnpushed": {
+          "type": "boolean",
+          "default": true,
+          "description": "Mark files changed by commits that are not on the upstream yet with ↑."
+        }
+      }
+    },
+    "sidebar": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "collapsedByDefault": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start the sidebar section collapsed the first time it is shown; afterwards the last state is remembered."
+        },
+        "maxRows": {
+          "type": "integer",
+          "minimum": 3,
+          "default": 20,
+          "description": "Tree rows shown in the sidebar before it scrolls."
         }
       }
     },
     "ignore": {
       "type": "array",
-      "items": { "type": "string" },
-      "default": ["node_modules/", ".git/", "dist/", ".DS_Store"],
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "node_modules/",
+        ".git/",
+        "dist/",
+        ".DS_Store"
+      ],
       "description": "Names or basename globs to hide. A trailing slash restricts the rule to directories."
     },
     "watch": {
@@ -110,10 +158,21 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["match", "provider"],
+            "required": [
+              "match",
+              "provider"
+            ],
             "properties": {
-              "match": { "type": "string", "minLength": 1, "description": "Basename glob, e.g. *.md or Makefile." },
-              "provider": { "type": "string", "minLength": 1, "description": "Provider id, either a built-in or one declared under providers." }
+              "match": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Basename glob, e.g. *.md or Makefile."
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Provider id, either a built-in or one declared under providers."
+              }
             }
           }
         },
@@ -123,7 +182,9 @@
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["module"],
+            "required": [
+              "module"
+            ],
             "properties": {
               "module": {
                 "type": "string",
@@ -150,10 +211,17 @@
         },
         "fallback": {
           "type": "array",
-          "default": ["system-open", "hex"],
+          "default": [
+            "system-open",
+            "hex"
+          ],
           "description": "Ordered fallbacks when the command is unavailable.",
           "items": {
-            "enum": ["system-open", "hex", "none"],
+            "enum": [
+              "system-open",
+              "hex",
+              "none"
+            ],
             "description": "system-open hands the file to the OS; hex shows an explanatory message; none does nothing."
           }
         }
@@ -161,8 +229,16 @@
     },
     "protect": {
       "type": "array",
-      "items": { "type": "string" },
-      "default": ["**/*.env", "**/.ssh/**", "**/secrets/**", "**/*.pem", "**/id_rsa"],
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "**/*.env",
+        "**/.ssh/**",
+        "**/secrets/**",
+        "**/*.pem",
+        "**/id_rsa"
+      ],
       "description": "Globs that require a confirmation before a file is opened. ** spans path separators."
     },
     "confirmOverwrite": {
@@ -173,11 +249,20 @@
     "keybinds": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Informational keybinding labels shown in the footer.",
+      "description": "Informational keybinding labels shown in the footer. The bindings themselves are fixed and listed in the README.",
       "properties": {
-        "copy": { "type": "string", "default": "ctrl+c" },
-        "paste": { "type": "string", "default": "ctrl+v" },
-        "refresh": { "type": "string", "default": "r" }
+        "copy": {
+          "type": "string",
+          "default": "alt+c"
+        },
+        "paste": {
+          "type": "string",
+          "default": "alt+v"
+        },
+        "refresh": {
+          "type": "string",
+          "default": "alt+r"
+        }
       }
     }
   }

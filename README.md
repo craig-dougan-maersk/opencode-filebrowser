@@ -5,28 +5,41 @@ with copy/paste, an in-terminal plain-text editor and binary viewing.
 
 ## What it does
 
+- **Collapsible sidebar section.** The browser sits in a bordered box in
+  `sidebar.content`. Click the `▼ Files` header to collapse it to one line, as
+  with the host's own sidebar groups; the state is remembered across restarts.
+  While collapsed, filesystem watching and git refreshes pause.
 - **Tabbed trees.** Several browser tabs, each with its own root, expansion
-  state and selection. `ctrl+t` opens one, `ctrl+w` closes it.
-- **Sidebar or panel.** The browser renders in `sidebar.content` by default.
-  `ctrl+o` (or the *Open file browser panel* palette command) moves it into a
-  `session.panel` side panel — the split-window form.
+  state and selection. `alt+t` opens one, `alt+w` closes it.
+- **Sidebar or panel.** `alt+p` (or the *Open file browser panel* palette
+  command) also opens the browser in a `session.panel` side panel — the
+  split-window form.
 - **Selection and copy/paste.** Click selects; shift/ctrl-click extends the
-  selection. `ctrl+c` copies, `ctrl+v` pastes into the directory the selection
+  selection. `alt+c` copies, `alt+v` pastes into the directory the selection
   is anchored in. Paths are also published over OSC 52 when the terminal
   supports it, so they can be pasted into other applications.
 - **Paste rules.** Pasting into the *same* directory always prompts for a new
   name. Pasting elsewhere with no clash copies silently. Pasting elsewhere with
-  a clash prompts.
-- **Inline editor.** Double-clicking a text file opens it in a plain-text
-  editor inside OpenCode — nothing is handed to an external program. `ctrl+s`
-  saves, `esc` closes (with a confirmation when the buffer is dirty).
+  a clash prompts. A folder is never pasted into itself or its own subfolder.
+- **Editor overlay.** Double-clicking a text file opens it in a full-width
+  overlay over the session, not in the sidebar. The header shows the path and a
+  `●` while there are unsaved changes. `ctrl+s` saves; `esc` closes, and asks
+  *Save and close / Discard changes / Keep editing* when the buffer is dirty.
+  Closing the overlay any other way (clicking outside it) keeps a dirty buffer,
+  and opening the file again brings it back.
 - **Binary files.** Double-clicking a binary dispatches a configurable keymap
   command, by default the `fileviewer.view` command from
   [`opencode-file-viewer`](https://github.com/eddy-lau/opencode-file-viewer).
   When that command is absent, the configured fallbacks apply.
-- **Presentation.** Colours come from the active OpenCode theme; directories get
-  folder icons and files get icons by name or extension; git status shows as
-  colour and, optionally, a porcelain badge.
+- **Git colours.** File names are coloured by git state in the JetBrains style
+  by default (modified blue, untracked red-brown, added green, deleted grey and
+  struck through, conflicts red, ignored olive); set `git.palette` to `vscode`
+  for VS Code's colours (modified amber, untracked and added green). Staged-only
+  changes are bold. Folders take the most severe state of anything below them.
+  Files changed by commits that are not pushed yet are marked `↑`, and the
+  header shows the branch with its ahead/behind counts.
+- **Presentation.** Other colours come from the active OpenCode theme;
+  directories get folder icons and files get icons by name or extension.
 
 ## Install
 
@@ -51,7 +64,9 @@ or malformed field falls back to its default without discarding the rest.
 every field and can be referenced from an editor for completion.
 
 Run **File browser settings** from the command palette to change the root mode,
-icon style, git colouring, default editor provider and binary viewer command.
+icon style, git colouring and palette, the unpushed marker, whether the sidebar
+section starts collapsed, the default editor provider and the binary viewer
+command.
 Each change is written straight back to the file, atomically, and the browser
 reloads the affected trees. The dialog edits a subset of the file; the rest is
 hand-edited as JSON.
@@ -61,6 +76,8 @@ hand-edited as JSON.
   "$schema": "./filebrowser.schema.json",
   "root": { "mode": "session", "allowAbove": false },
   "icons": { "style": "nerdfont" },
+  "git": { "palette": "jetbrains", "showUnpushed": true },
+  "sidebar": { "collapsedByDefault": false, "maxRows": 20 },
   "ignore": ["node_modules/", "dist/"],
   "editor": {
     "default": "plaintext",
@@ -82,7 +99,7 @@ hand-edited as JSON.
 | `unrestricted` | `root.path` or the session directory, with no containment check |
 
 With `root.allowAbove` set to `false`, navigation above the resolved root — and
-`ctrl+g` destinations outside it — are refused.
+`alt+g` destinations and agent reveals outside it — are refused.
 
 ### Editor providers
 
@@ -108,27 +125,38 @@ the rest.
 
 ## Keybindings
 
-The browser's keyboard layer is only active while the browser has focus, so its
-keys do not shadow the rest of OpenCode.
+The browser never binds plain keys, so `enter`, `backspace`, the arrows and
+letters always reach the prompt. Its shortcuts are `alt` chords that OpenCode
+leaves unbound, and they only exist while focus is inside the browser: click
+the tree (or run **Focus the file browser**) to use them, click the prompt to
+leave. On macOS the terminal must send Option as Meta/Alt (iTerm2: *Profiles →
+Keys → Left Option key: Esc+*; Terminal.app: *Use Option as Meta key*; kitty and
+WezTerm do this by default).
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` | Move the selection |
-| `→` / `enter` | Expand a directory, or open a file |
-| `←` | Collapse a directory, or go to the parent |
-| `backspace` | Go to the parent directory |
-| `ctrl+g` | Go to a directory by path |
-| `ctrl+n` | New file in the current directory |
-| `ctrl+c` / `ctrl+v` | Copy the selection / paste |
-| `ctrl+t` / `ctrl+w` | New browser tab / close browser tab |
-| `ctrl+tab` / `ctrl+shift+tab` | Next / previous browser tab |
-| `ctrl+o` | Toggle the side panel |
-| `f5` | Refresh the tree |
-| `ctrl+s` | Save (editor) |
-| `esc` | Close the editor |
+| `alt+j` / `alt+k` | Move the selection down / up |
+| `alt+l` / `alt+o` | Expand a directory, or open a file |
+| `alt+h` | Collapse a directory, or go to the parent |
+| `alt+u` | Go to the parent directory |
+| `alt+g` | Go to a directory by path |
+| `alt+n` | New file in the current directory |
+| `alt+c` / `alt+v` | Copy the selection / paste |
+| `alt+t` / `alt+w` | New browser tab / close browser tab |
+| `alt+]` / `alt+[` | Next / previous browser tab |
+| `alt+p` | Toggle the side panel |
+| `alt+r` | Refresh the tree |
 
-Two palette commands are always available: **Focus the file browser** and
-**File browser settings**.
+In the editor overlay:
+
+| Key | Action |
+| --- | --- |
+| `ctrl+s` | Save |
+| `esc` | Close (asks first when there are unsaved changes) |
+
+Palette commands are always available: **Open file browser panel**, **Focus the
+file browser**, **Collapse or expand the file browser** and **File browser
+settings**.
 
 ## Agent tool
 
