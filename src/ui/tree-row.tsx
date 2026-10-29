@@ -67,6 +67,7 @@ export interface TreeRowProps {
   palette: GitPalette;
   showUnpushed: boolean;
   onMouseDown: (event: unknown, row: TreeRow) => void;
+  onMouseUp?: (event: unknown, row: TreeRow) => void;
 }
 
 /** One tree line: indent, icon, name, optional git badge. */
@@ -96,7 +97,9 @@ export function TreeRowView(props: TreeRowProps): JSX.Element {
     props.selected ? props.tokens.backgroundRaisedHigh : props.alsoSelected ? props.tokens.backgroundRaised : undefined;
 
   return (
-    <box flexDirection="row" width="100%" backgroundColor={background()} onMouseDown={(event) => props.onMouseDown(event, props.row)}>
+    <box flexDirection="row" width="100%" backgroundColor={background()} onMouseDown={(event) => props.onMouseDown(event, props.row)}
+      onMouseUp={(event) => props.onMouseUp?.(event, props.row)}
+    >
       <text
         fg={style().fg}
         attributes={props.selected ? style().attributes | BOLD | TextAttributes.INVERSE : style().attributes}

@@ -15,7 +15,7 @@ import { Plugin } from "@opencode/plugin/tui";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { TextAttributes } from "@opentui/core";
 import { ancestorsOf, compileIgnore, createBudget, flattenTree, isWithin, resolveRoot } from "./lib/fs-tree.js";
-import { readGitStatus, statusFor } from "./lib/git.js";
+import { readTreeGitStatus, statusFor } from "./lib/git.js";
 import { compileProtection, isProtected } from "./lib/protect.js";
 import { buildRegistry, resolveProvider } from "./lib/providers.js";
 import { copyEntry, createFile, pathExists, pathIsDirectory, readTextFile, sniffBinary, systemOpenCommand, writeTextFile } from "./lib/files.js";
@@ -167,7 +167,7 @@ export default Plugin.define({
       try {
         const budget = createBudget();
         const rows = await flattenTree(tab.root, new Set(tab.expanded), ignoreRules(), 0, undefined, budget);
-        const git = settings().git.enabled && visible() ? await readGitStatus(tab.root, settings().git.timeoutMs, {
+        const git = settings().git.enabled && visible() ? await readTreeGitStatus(tab.root, rows.filter(row => row.entry.directory && !row.entry.symlink).map(row => row.entry.path), settings().git.timeoutMs, {
           unpushed: settings().git.showUnpushed
         }) : tab.git;
         if (generations.get(tabID) !== generation) return;
@@ -1384,6 +1384,9 @@ function Browser(props) {
     props.panel.focus();
     if (container && !container.isDestroyed) container.focus();
   });
+
+  /** Row whose second click went down; it opens when that button comes up. */
+  let pendingOpen;
   const onRowMouseDown = (event, row) => {
     stopEvent(event);
     const now = Date.now();
@@ -1393,12 +1396,22 @@ function Browser(props) {
       time: now
     };
     if (double) {
+      // Opening on mouse-down would put the overlay under the pointer, and the
+      // matching mouse-up would land on the dialog backdrop, which the host
+      // treats as a click outside and closes the dialog straight away.
       lastClick = undefined;
-      props.actions.openRow(row);
+      pendingOpen = row.entry.path;
       return;
     }
+    pendingOpen = undefined;
     const modifiers = event?.modifiers ?? {};
     props.actions.selectRow(row, modifiers);
+  };
+  const onRowMouseUp = (event, row) => {
+    if (pendingOpen !== row.entry.path) return;
+    stopEvent(event);
+    pendingOpen = undefined;
+    props.actions.openRow(row);
   };
   const protectedRows = createMemo(() => compileProtection(props.settings().protect));
   const isRowProtected = (row, root) => isProtected(row.entry.path, root, protectedRows()) !== undefined;
@@ -1513,7 +1526,8 @@ function Browser(props) {
             get showUnpushed() {
               return props.settings().git.showUnpushed;
             },
-            onMouseDown: onRowMouseDown
+            onMouseDown: onRowMouseDown,
+            onMouseUp: onRowMouseUp
           })
         }), null);
         _$insert(_el$12, _$createComponent(Show, {

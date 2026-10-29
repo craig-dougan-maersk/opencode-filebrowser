@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 function classify(index, worktree) {
   const pair = `${index}${worktree}`;
@@ -296,4 +296,74 @@ export function badgeFor(entry) {
   if (entry.code === "untracked") return "??";
   if (entry.code === "ignored") return "";
   return `${entry.raw.replace(/ /g, "").slice(0, 2)}${arrow}`;
+}
+const SEVERITY_RANK = entry => entry ? SEVERITY[entry.code] : -1;
+
+/**
+ * Combines the status of several repositories shown in one tree: the one the
+ * tree root sits in (if any) and repositories nested below it. A parent
+ * repository reports a nested one as an untracked `dir/`; those records are
+ * dropped so the nested repository's own state shows instead. Directory
+ * roll-ups are recomputed up to the tree root, so a plain folder holding
+ * repositories still takes the colour of the changes below it.
+ */
+export function mergeGitStatus(statuses, treeRoot) {
+  const repos = statuses.filter(status => status.root !== undefined);
+  if (repos.length === 0) return {
+    entries: new Map()
+  };
+  const roots = repos.map(status => status.root);
+  const nestedUnder = (owner, target) => roots.some(root => root !== owner && root.startsWith(`${owner}${path.sep}`) && (target === root || target.startsWith(`${root}${path.sep}`)));
+  const entries = new Map();
+  const unpushed = new Set();
+  const ignoredDirectories = [];
+  const untrackedDirectories = [];
+  for (const status of repos) {
+    const owner = status.root;
+    for (const [file, entry] of status.entries) {
+      if (nestedUnder(owner, file)) continue;
+      if (SEVERITY_RANK(entry) > SEVERITY_RANK(entries.get(file))) entries.set(file, entry);
+    }
+    for (const file of status.unpushed ?? []) if (!nestedUnder(owner, file)) unpushed.add(file);
+    for (const prefix of status.ignoredDirectories ?? []) if (!nestedUnder(owner, prefix.slice(0, -1))) ignoredDirectories.push(prefix);
+    for (const prefix of status.untrackedDirectories ?? []) if (!nestedUnder(owner, prefix.slice(0, -1))) untrackedDirectories.push(prefix);
+  }
+  const primary = repos.find(status => {
+    const root = status.root;
+    return treeRoot === root || treeRoot.startsWith(`${root}${path.sep}`);
+  });
+  const resolvedRoot = path.resolve(treeRoot);
+  return {
+    root: primary?.root,
+    branch: primary?.branch,
+    upstream: primary?.upstream,
+    ahead: primary?.ahead,
+    behind: primary?.behind,
+    entries,
+    unpushed,
+    ignoredDirectories,
+    untrackedDirectories,
+    directories: aggregateDirectories(entries, unpushed, resolvedRoot)
+  };
+}
+
+/**
+ * Reads git status for a tree: the repository containing `treeRoot`, plus any
+ * of `directories` (the tree's visible folders) that is itself the top of a
+ * repository, so a workspace folder of checkouts is coloured too.
+ */
+export async function readTreeGitStatus(treeRoot, directories, timeoutMs, options = {}) {
+  const nested = await Promise.all(directories.map(async directory => (await lstat(path.join(directory, ".git")).then(() => true, () => false)) ? directory : undefined));
+  const candidates = [treeRoot, ...nested.filter(directory => directory !== undefined && directory !== treeRoot)];
+  const statuses = await Promise.all(candidates.map(directory => readGitStatus(directory, timeoutMs, options)));
+  const seen = new Set();
+  const unique = statuses.filter(status => {
+    if (!status.root || seen.has(status.root)) return false;
+    seen.add(status.root);
+    return true;
+  });
+  if (unique.length === 1 && unique[0]?.root && (treeRoot === unique[0].root || treeRoot.startsWith(`${unique[0].root}${path.sep}`))) {
+    return unique[0];
+  }
+  return mergeGitStatus(unique, treeRoot);
 }

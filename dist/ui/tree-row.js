@@ -73,6 +73,7 @@ export function TreeRowView(props) {
     _$setProp(_el$, "flexDirection", "row");
     _$setProp(_el$, "width", "100%");
     _$setProp(_el$, "onMouseDown", event => props.onMouseDown(event, props.row));
+    _$setProp(_el$, "onMouseUp", event => props.onMouseUp?.(event, props.row));
     _$setProp(_el$2, "flexGrow", 1);
     _$setProp(_el$2, "wrapMode", "none");
     _$setProp(_el$2, "truncate", true);

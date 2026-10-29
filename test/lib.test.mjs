@@ -609,3 +609,34 @@ test("aggregateDirectories handles a filesystem-root repository", () => {
   const directories = aggregateDirectories(new Map([["/a/b.ts", { code: "added", raw: "A " }]]), new Set(), "/");
   assert.equal(directories.get("/a").code, "added");
 });
+
+test("readTreeGitStatus colours repositories nested in a non-repository folder", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { readTreeGitStatus, statusFor: status } = await import("../dist/lib/git.js");
+  const base = await mkdtemp(join(tmpdir(), "fb-ws-"));
+  try {
+    const repo = join(base, "repo");
+    await mkdir(repo);
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    await writeFile(join(repo, "a.txt"), "x");
+    await mkdir(join(base, "plain"));
+    const merged = await readTreeGitStatus(base, [repo, join(base, "plain")], 4000);
+    assert.equal(status(merged, repo, true).code, "untracked");
+    assert.equal(status(merged, join(repo, "a.txt"), false).code, "untracked");
+    assert.equal(status(merged, join(base, "plain"), true), undefined);
+    assert.equal(merged.branch, undefined);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("mergeGitStatus drops a parent's record of a nested repository", async () => {
+  const { mergeGitStatus } = await import("../dist/lib/git.js");
+  const parent = { root: "/w", branch: "main", entries: new Map([["/w/sub", { code: "untracked", raw: "??" }]]), untrackedDirectories: ["/w/sub/"] };
+  const child = { root: "/w/sub", branch: "dev", entries: new Map([["/w/sub/f.ts", { code: "modified", raw: " M" }]]) };
+  const merged = mergeGitStatus([parent, child], "/w");
+  assert.equal(merged.branch, "main");
+  assert.equal(merged.entries.has("/w/sub"), false);
+  assert.deepEqual(merged.untrackedDirectories, []);
+  assert.equal(merged.directories.get("/w/sub").code, "modified");
+});

@@ -7,7 +7,7 @@ import type { Context, PanelInput } from "@opencode/plugin/tui/context";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { TextAttributes, type Renderable } from "@opentui/core";
 import { ancestorsOf, compileIgnore, createBudget, flattenTree, isWithin, resolveRoot, type TreeRow } from "./lib/fs-tree";
-import { readGitStatus, statusFor, type GitStatus } from "./lib/git";
+import { readTreeGitStatus, statusFor, type GitStatus } from "./lib/git";
 import { compileProtection, isProtected } from "./lib/protect";
 import { buildRegistry, resolveProvider } from "./lib/providers";
 import {
@@ -177,7 +177,12 @@ export default Plugin.define({
         const rows = await flattenTree(tab.root, new Set(tab.expanded), ignoreRules(), 0, undefined, budget);
         const git: GitStatus | undefined =
           settings().git.enabled && visible()
-            ? await readGitStatus(tab.root, settings().git.timeoutMs, { unpushed: settings().git.showUnpushed })
+            ? await readTreeGitStatus(
+                tab.root,
+                rows.filter((row) => row.entry.directory && !row.entry.symlink).map((row) => row.entry.path),
+                settings().git.timeoutMs,
+                { unpushed: settings().git.showUnpushed },
+              )
             : tab.git;
         if (generations.get(tabID) !== generation) return;
         store.update(tabID, (current) => ({
@@ -1272,19 +1277,33 @@ function Browser(props: BrowserProps): JSX.Element {
     if (container && !container.isDestroyed) container.focus();
   });
 
+  /** Row whose second click went down; it opens when that button comes up. */
+  let pendingOpen: string | undefined;
+
   const onRowMouseDown = (event: unknown, row: TreeRow) => {
     stopEvent(event);
     const now = Date.now();
     const double = lastClick !== undefined && lastClick.path === row.entry.path && now - lastClick.time < DOUBLE_CLICK_MS;
     lastClick = { path: row.entry.path, time: now };
     if (double) {
+      // Opening on mouse-down would put the overlay under the pointer, and the
+      // matching mouse-up would land on the dialog backdrop, which the host
+      // treats as a click outside and closes the dialog straight away.
       lastClick = undefined;
-      props.actions.openRow(row);
+      pendingOpen = row.entry.path;
       return;
     }
+    pendingOpen = undefined;
     const modifiers =
       (event as { modifiers?: { shift?: boolean; ctrl?: boolean; meta?: boolean } } | undefined)?.modifiers ?? {};
     props.actions.selectRow(row, modifiers);
+  };
+
+  const onRowMouseUp = (event: unknown, row: TreeRow) => {
+    if (pendingOpen !== row.entry.path) return;
+    stopEvent(event);
+    pendingOpen = undefined;
+    props.actions.openRow(row);
   };
 
   const protectedRows = createMemo(() => compileProtection(props.settings().protect));
@@ -1357,6 +1376,7 @@ function Browser(props: BrowserProps): JSX.Element {
                     palette={props.settings().git.palette}
                     showUnpushed={props.settings().git.showUnpushed}
                     onMouseDown={onRowMouseDown}
+                    onMouseUp={onRowMouseUp}
                   />
                 )}
               </For>
